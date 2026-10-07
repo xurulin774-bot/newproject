@@ -601,6 +601,149 @@ class WeatherStore:
                 continue
         return profiles
 
+    def advice(self, city_key: str, month: int | None = None) -> dict[str, Any]:
+        """出行助手：综合实况/历史同期气候、降水模型与空气质量生成生活指数与建议。
+
+        month 为空表示"当前实况"模式（使用最新观测 + 模型实时降水概率）；
+        指定月份则为"历史同期"模式（降水概率改用该月历史湿滑天气占比）。
+        """
+        climate = self.climate()
+        if city_key not in climate.index:
+            raise KeyError(city_key)
+        profile = self.city_profile(city_key)
+        current_month = int(pd.Timestamp.now().month)
+
+        if month is None:
+            mode = "now"
+            temperature = float(profile["temperature"])
+            humidity = float(profile["humidity"])
+            precip = float(profile["precipitation"])
+            pm25 = float(profile["pm25"])
+            uv = float(profile["uv"])
+            rain_prob = float(profile["rain_probability"]) if profile.get("rain_probability") is not None else None
+            condition = profile.get("condition")
+        else:
+            mode = "month"
+            month = max(1, min(int(month), 12))
+            row = climate.loc[city_key]
+            temperature = float(row[f"temp_{month}"])
+            humidity = float(row[f"hum_{month}"])
+            precip = float(row[f"pr_{month}"])
+            sub = self.frame[(self.frame["city_key"] == city_key) & (self.frame["observed_month"] == month)]
+            pm25 = float(sub["air_quality_PM2.5"].mean()) if len(sub) else float(profile["pm25"])
+            uv = float(sub["uv_index"].mean()) if len(sub) else float(profile["uv"])
+            wet = sub["condition_normalized"].astype(str).str.lower().str.contains(
+                "rain|storm|snow|sleet|thunder|drizzle", regex=True, na=False)
+            rain_prob = round(float(wet.mean()) * 100, 1) if len(sub) else None
+            condition = None
+
+        rain_prob = 0.0 if rain_prob is None else rain_prob
+        deviation = round(temperature - float(climate.loc[city_key, f"temp_{current_month}"]), 1)
+
+        # ---- 六项生活指数 ----
+        if temperature >= 28:
+            clothing = ("炎热", "短袖短裤，注意防暑补水", "issue")
+        elif temperature >= 22:
+            clothing = ("温暖", "短袖或薄长袖即可", "ok")
+        elif temperature >= 15:
+            clothing = ("微凉", "长袖外加薄外套", "ok")
+        elif temperature >= 5:
+            clothing = ("较冷", "外套毛衣注意保暖", "warn")
+        else:
+            clothing = ("寒冷", "羽绒服、帽子手套全套", "issue")
+
+        if rain_prob >= 60:
+            umbrella = ("必备雨具", f"降水概率约 {rain_prob:.0f}%，出门务必带伞", "issue")
+        elif rain_prob >= 30:
+            umbrella = ("建议携带", f"降水概率约 {rain_prob:.0f}%，有降雨可能", "warn")
+        else:
+            umbrella = ("基本不用", f"降水概率仅 {rain_prob:.0f}%", "ok")
+
+        if pm25 <= 35 and rain_prob < 50 and -5 <= temperature <= 32:
+            sport = ("适宜", "空气好、天气舒适，适合户外运动", "ok")
+        elif pm25 <= 115 and temperature <= 35:
+            sport = ("较适宜", "轻度敏感人群可酌量户外活动", "warn")
+        else:
+            sport = ("不适宜", "空气或天气条件较差，建议室内运动", "issue")
+
+        if rain_prob >= 50:
+            carwash = ("不宜洗车", "近期降雨概率高，洗了容易白洗", "issue")
+        elif rain_prob >= 20:
+            carwash = ("谨慎", "有一定降雨可能", "warn")
+        else:
+            carwash = ("适宜洗车", "近期无雨，放心洗车", "ok")
+
+        if uv >= 8:
+            sunscreen = ("很强", "SPF50+ 防晒霜、遮阳帽墨镜", "issue")
+        elif uv >= 5:
+            sunscreen = ("中等", "SPF30 防晒，午后减少暴晒", "warn")
+        else:
+            sunscreen = ("较弱", "常规防护即可", "ok")
+
+        if pm25 <= 35:
+            air = ("优", "空气清新，放心出行", "ok")
+        elif pm25 <= 75:
+            air = ("良", "空气可以接受，极敏感人群留意", "ok")
+        elif pm25 <= 115:
+            air = ("轻度污染", "敏感人群减少户外长时间活动", "warn")
+        elif pm25 <= 150:
+            air = ("中度污染", "外出建议佩戴口罩", "issue")
+        else:
+            air = ("重度污染", "尽量减少外出，佩戴防护口罩", "issue")
+
+        indices = [
+            {"key": "clothing", "name": "穿衣指数", "level": clothing[0], "tone": clothing[2], "text": clothing[1]},
+            {"key": "umbrella", "name": "雨伞指数", "level": umbrella[0], "tone": umbrella[2], "text": umbrella[1]},
+            {"key": "sport", "name": "运动指数", "level": sport[0], "tone": sport[2], "text": sport[1]},
+            {"key": "carwash", "name": "洗车指数", "level": carwash[0], "tone": carwash[2], "text": carwash[1]},
+            {"key": "sunscreen", "name": "防晒指数", "level": sunscreen[0], "tone": sunscreen[2], "text": sunscreen[1]},
+            {"key": "air", "name": "空气质量", "level": air[0], "tone": air[2], "text": air[1]},
+        ]
+
+        score = (
+            bounded_target(pd.Series([temperature]), 23, 18).iloc[0] * 0.35
+            + bounded_target(pd.Series([humidity]), 55, 40).iloc[0] * 0.15
+            + bounded_inverse(pd.Series([precip]), 10).iloc[0] * 0.20
+            + bounded_inverse(pd.Series([pm25]), 100).iloc[0] * 0.18
+            + (1 - min(rain_prob, 100) / 100) * 0.12
+        ) * 100
+
+        parts = [f"{clothing[1]}", umbrella[1], air[1]]
+        if mode == "now" and abs(deviation) >= 1.5:
+            parts.append(f"当前气温较历史同期{'偏高' if deviation > 0 else '偏低'} {abs(deviation):.1f} °C")
+        if score >= 75:
+            verdict = "非常适合出行"
+        elif score >= 60:
+            verdict = "总体适合出行"
+        elif score >= 45:
+            verdict = "出行体验一般"
+        else:
+            verdict = "条件较差，建议改期或调整行程"
+        summary = f"{profile['city']}（{profile['country']}）综合评分 {score:.0f} 分，{verdict}。" + "；".join(parts) + "。"
+
+        return {
+            "city_key": city_key,
+            "city": profile["city"],
+            "country": profile["country"],
+            "mode": mode,
+            "month": month,
+            "score": round(float(score), 1),
+            "verdict": verdict,
+            "indices": indices,
+            "facts": {
+                "temperature": round(temperature, 1),
+                "humidity": round(humidity, 0),
+                "precipitation": round(precip, 1),
+                "pm25": round(pm25, 1),
+                "uv": round(uv, 1),
+                "rain_probability": rain_prob,
+                "condition": condition,
+                "deviation": deviation if mode == "now" else None,
+            },
+            "summary": summary,
+            "monthly_temp": profile["monthly_temp"],
+        }
+
     def forecast(self, city_key: str | None = None, days: int = 30) -> dict[str, Any]:
         """温度趋势外推（演示用）：30 日滑动平均 + 线性回归，非气象预报。"""
         days = max(7, min(int(days), 90))
@@ -1053,6 +1196,15 @@ class WeatherRequestHandler(SimpleHTTPRequestHandler):
                 return
             if parsed.path == "/api/clusters":
                 self.send_json(self.store.clusters(self._query_int(query, "k", 5)))
+                return
+            if parsed.path == "/api/advice":
+                key = self._query_text(query, "k")
+                try:
+                    month_text = self._query_text(query, "month")
+                    month = int(month_text) if month_text else None
+                    self.send_json(self.server.store.advice(key, month))
+                except KeyError:
+                    self.send_json({"error": f"未知城市：{key or '(未指定)'}"}, status=404)
                 return
             if parsed.path == "/api/ml":
                 metrics_path = PROJECT_ROOT / "data" / "profile" / "ml_metrics.json"

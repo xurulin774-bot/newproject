@@ -18,6 +18,10 @@ const state = {
   recommendQuery: "",
   similarQuery: "",
   similarResult: null,
+  adviceQuery: "",
+  adviceCity: null,
+  adviceMonth: null,
+  adviceData: null,
   mlTimer: null,
   planMonth: new Date().getMonth() + 1,
   planMode: "comfort",
@@ -35,6 +39,7 @@ const routes = {
   "/recommend": { title: "出行推荐中心", section: "智能推荐" },
   "/similar": { title: "相似城市", section: "智能推荐" },
   "/plan": { title: "出行规划", section: "智能推荐" },
+  "/advice": { title: "出行助手", section: "智能推荐" },
   "/eda": { title: "EDA 分析图谱", section: "分析洞察" },
   "/ml": { title: "算法实验", section: "分析洞察" },
   "/quality": { title: "数据质量检查", section: "分析洞察" },
@@ -59,6 +64,7 @@ const navGroups = [
       { path: "/recommend", icon: "✦", label: "推荐中心" },
       { path: "/similar", icon: "◈", label: "相似城市" },
       { path: "/plan", icon: "◔", label: "出行规划" },
+      { path: "/advice", icon: "☂", label: "出行助手" },
     ],
   },
   {
@@ -1060,6 +1066,106 @@ async function loadMlRisk() {
   } catch (error) { /* 列表加载失败不影响主页面 */ }
 }
 
+// ---------------- 出行助手（生活指数 + 综合评分 + 建议） ----------------
+
+function renderAdvice() {
+  const months = Array.from({ length: 12 }, (_, index) => index + 1);
+  document.getElementById("page-root").innerHTML = `${pageHeader("TRAVEL ASSISTANT", "出行助手", "选择城市与出行时间，系统综合实况/历史同期气候、机器学习降水概率与空气质量，生成六项生活指数和出行建议。", '<span class="rule-badge">数据驱动 · 非天气预报</span>')}<section class="content-card"><div class="filter-bar"><label class="search-field"><span>⌕</span><input id="advice-search" value="${esc(state.adviceQuery)}" placeholder="搜索城市，如 Beijing / Paris / 中国" /></label><button class="primary-button" id="advice-search-button">查询</button><span class="filter-hint">当前城市：${esc(displayCity((state.adviceCity || "China | Beijing").split(" | ")[1]))}</span></div><div class="chip-row" id="advice-chips"></div><div class="recommend-toolbar" style="margin-top:10px"><div class="segmented-control"><button class="segment ${state.adviceMonth === null ? "active" : ""}" data-amonth="">当前实况</button>${months.map((month) => `<button class="segment ${state.adviceMonth === month ? "active" : ""}" data-amonth="${month}">${month}月</button>`).join("")}</div></div></section><div id="advice-result"></div>`;
+  document.getElementById("advice-search-button").addEventListener("click", searchAdviceCities);
+  document.getElementById("advice-search").addEventListener("keydown", (event) => { if (event.key === "Enter") searchAdviceCities(); });
+  document.querySelectorAll("[data-amonth]").forEach((button) => button.addEventListener("click", () => {
+    state.adviceMonth = button.dataset.amonth === "" ? null : Number(button.dataset.amonth);
+    document.querySelectorAll("[data-amonth]").forEach((item) => item.classList.toggle("active", item === button));
+    loadAdvice();
+  }));
+  if (!state.adviceCity) state.adviceCity = "China | Beijing";
+  loadAdvice();
+}
+
+async function searchAdviceCities() {
+  state.adviceQuery = document.getElementById("advice-search").value.trim();
+  const box = document.getElementById("advice-chips");
+  if (!box) return;
+  box.innerHTML = '<span class="muted">搜索中...</span>';
+  try {
+    const result = await api(`/api/cities?q=${encodeURIComponent(state.adviceQuery)}&limit=10`);
+    const items = result.items || [];
+    box.innerHTML = items.length
+      ? items.map((item) => `<button class="chip" data-key="${esc(`${item.country} | ${item.city}`)}">${esc(displayCity(item.city))} · ${esc(displayCountry(item.country))}</button>`).join("")
+      : '<span class="muted">没有匹配的城市</span>';
+    box.querySelectorAll(".chip").forEach((chip) => chip.addEventListener("click", () => {
+      state.adviceCity = chip.dataset.key;
+      loadAdvice();
+    }));
+  } catch (error) { box.innerHTML = `<span class="warning-text">${esc(error.message)}</span>`; }
+}
+
+async function loadAdvice() {
+  const box = document.getElementById("advice-result");
+  if (!box) return;
+  const params = new URLSearchParams({ k: state.adviceCity });
+  if (state.adviceMonth) params.set("month", String(state.adviceMonth));
+  box.innerHTML = '<div class="loading-state"><span class="spinner"></span>正在生成出行建议...</div>';
+  try {
+    state.adviceData = await api(`/api/advice?${params}`);
+    renderAdviceResult();
+  } catch (error) { box.innerHTML = `<div class="error-panel"><strong>生成失败</strong><p>${esc(error.message)}</p></div>`; }
+}
+
+function renderAdviceResult() {
+  const box = document.getElementById("advice-result");
+  if (!box || !state.adviceData) return;
+  const data = state.adviceData;
+  const facts = [
+    [`温度 ${fmt(data.facts.temperature)}°C`],
+    [`湿度 ${fmt(data.facts.humidity, 0)}%`],
+    [`降水 ${fmt(data.facts.precipitation)}mm`],
+    [`PM2.5 ${fmt(data.facts.pm25)}`],
+    [`紫外线 ${fmt(data.facts.uv)}`],
+    [`${data.mode === "now" ? "实时" : "历史同期"}降水概率 ${fmt(data.facts.rain_probability)}%`],
+  ];
+  if (data.facts.condition) facts.push([`实况：${displayCondition(data.facts.condition)}`]);
+  if (data.facts.deviation !== null && data.facts.deviation !== undefined && Math.abs(data.facts.deviation) >= 1.5) {
+    facts.push([`较同期${data.facts.deviation > 0 ? "偏高" : "偏低"} ${fmt(Math.abs(data.facts.deviation))}°C`]);
+  }
+  box.innerHTML = `
+    <div class="dashboard-grid">
+      <section class="content-card"><div class="card-heading"><div><p class="kicker">OVERALL SCORE</p><h2>综合出行评分</h2></div><span class="muted">${esc(data.mode === "now" ? "当前实况 + 实时模型" : `${data.month} 月历史同期`)}</span></div><div id="advice-gauge" style="height:200px"></div><div class="chip-row">${facts.map(([text]) => `<span class="chip active">${esc(text)}</span>`).join("")}</div></section>
+      <section class="content-card"><div class="card-heading"><div><p class="kicker">MONTHLY CONTEXT</p><h2>全年逐月均温</h2></div><span class="muted">红色为${data.mode === "now" ? "当前" : "所选"}月份</span></div><div id="advice-months" style="height:200px"></div></section>
+    </div>
+    <section class="content-card" style="margin-top:18px"><div class="card-heading"><div><p class="kicker">LIFE INDICES</p><h2>六项生活指数</h2></div><span class="muted">${esc(displayCity(data.city))} · ${esc(displayCountry(data.country))}</span></div><div class="advice-grid">${data.indices.map((item) => `<div class="advice-index"><span class="name">${esc(item.name)}</span><b class="level tone-${item.tone}">${esc(item.level)}</b><p>${esc(item.text)}</p></div>`).join("")}</div><div class="quality-note" style="margin-top:14px"><strong>出行建议</strong><p>${esc(data.summary)}</p></div></section>`;
+  const monthHighlight = data.mode === "now" ? new Date().getMonth() + 1 : data.month;
+  mountAdviceCharts(data, monthHighlight);
+}
+
+function mountAdviceCharts(data, monthHighlight) {
+  mountChart("advice-gauge", {
+    series: [{
+      type: "gauge", min: 0, max: 100, startAngle: 200, endAngle: -20, radius: "95%",
+      progress: { show: true, width: 14, itemStyle: { color: data.score >= 60 ? "#1b8278" : "#dd765b" } },
+      axisLine: { lineStyle: { width: 14, color: [[1, "#e1e9e6"]] } },
+      axisTick: { show: false }, splitLine: { show: false }, axisLabel: { show: false },
+      pointer: { show: false }, anchor: { show: false },
+      detail: { valueAnimation: true, fontSize: 28, offsetCenter: [0, "8%"], formatter: "{value} 分", color: "#123c39" },
+      title: { fontSize: 11, offsetCenter: [0, "45%"], color: "#71807e" },
+      data: [{ value: data.score, name: data.verdict }],
+    }],
+  });
+  mountChart("advice-months", {
+    tooltip: { trigger: "item", textStyle: { fontSize: 11 }, formatter: (params) => `${params.name}：${fmt(params.value)} °C` },
+    grid: { left: 34, right: 10, top: 16, bottom: 22 },
+    xAxis: { type: "category", data: ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"], axisLabel: { fontSize: 9 } },
+    yAxis: { type: "value", scale: true, axisLabel: { fontSize: 9, formatter: "{value}°" }, splitLine: { lineStyle: { color: "#e7efec" } } },
+    series: [{
+      type: "bar", barWidth: 14,
+      data: data.monthly_temp.map((value, index) => ({
+        value,
+        itemStyle: { color: index + 1 === monthHighlight ? "#dd765b" : "rgba(27,130,120,.45)", borderRadius: [3, 3, 0, 0] },
+      })),
+    }],
+  });
+}
+
 function mountMlChart(m) {
   const el = document.getElementById("ml-compare");
   if (!el) return;
@@ -1127,6 +1233,7 @@ async function renderPage() {
   if (state.route === "/similar") { renderSimilar(); return; }
   if (state.route === "/plan") { renderPlan(); return; }
   if (state.route === "/compare") { renderCompare(); return; }
+  if (state.route === "/advice") { renderAdvice(); return; }
   if (state.route === "/eda") {
     try {
       const data = await api("/api/eda");
