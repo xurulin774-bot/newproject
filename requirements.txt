@@ -1,0 +1,5 @@
+# The local dashboard only needs pandas.
+# matplotlib and seaborn are used by algorithm/run_eda.py.
+pandas>=2.0.0
+matplotlib>=3.7.0
+seaborn>=0.13.0

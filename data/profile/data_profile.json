@@ -1,0 +1,81 @@
+{
+  "source_file": "C:\\Users\\徐如林\\Downloads\\archive (2)\\GlobalWeatherRepository.csv",
+  "rows": 166254,
+  "columns": 41,
+  "countries": 211,
+  "locations": 268,
+  "time_coverage_utc": {
+    "start": "2024-05-16T08:45:00+00:00",
+    "end": "2026-09-19T05:45:00+00:00"
+  },
+  "missing_values": {},
+  "duplicate_rows": 0,
+  "top_conditions": {
+    "Partly Cloudy": 54206,
+    "Sunny": 49061,
+    "Patchy Rain Nearby": 15358,
+    "Overcast": 9315,
+    "Clear": 9260,
+    "Mist": 6639,
+    "Light Rain": 4768,
+    "Light Rain Shower": 4430,
+    "Cloudy": 2346,
+    "Fog": 2160,
+    "Moderate Or Heavy Rain With Thunder": 1211,
+    "Moderate Rain": 1136,
+    "Patchy Light Rain With Thunder": 944,
+    "Light Drizzle": 805,
+    "Patchy Light Drizzle": 547
+  },
+  "temperature_celsius": {
+    "mean": 21.465,
+    "median": 23.7,
+    "min": -29.8,
+    "max": 79.3
+  },
+  "air_quality_pm25": {
+    "median": 13.135,
+    "p95": 73.075,
+    "max": 1614.1
+  },
+  "sampling_gaps": {
+    "median_hours": 24.0,
+    "p95_hours": 24.5,
+    "gaps_over_24_hours": 44645
+  },
+  "unit_consistency": {
+    "temperature (F from C)": {
+      "mean_absolute_error": 0.03443838945228385,
+      "max_absolute_error": 0.12000000000000455
+    },
+    "wind (kph from mph)": {
+      "mean_absolute_error": 0.04772820279331614,
+      "max_absolute_error": 0.12017919999999993
+    },
+    "gust (kph from mph)": {
+      "mean_absolute_error": 0.04452845663141915,
+      "max_absolute_error": 0.12783360000000243
+    },
+    "pressure (in from mb)": {
+      "mean_absolute_error": 0.004817195430004543,
+      "max_absolute_error": 0.019639560000001666
+    },
+    "precipitation (in from mm)": {
+      "mean_absolute_error": 0.0006616245570031399,
+      "max_absolute_error": 0.005118193999999993
+    },
+    "visibility (miles from km)": {
+      "mean_absolute_error": 0.2862536778820358,
+      "max_absolute_error": 0.9941936
+    }
+  },
+  "domain_checks": {
+    "Temperature outside -60 to 60 C": 1,
+    "Pressure outside 850 to 1100 mb": 12,
+    "Humidity outside 0 to 100%": 0,
+    "Cloud cover outside 0 to 100%": 0,
+    "Negative precipitation": 0,
+    "Negative visibility": 0,
+    "Negative PM2.5": 0
+  }
+}
