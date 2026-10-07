@@ -313,3 +313,8 @@ code, .code-line { color: var(--teal-dark); background: #edf6f3; font-family: Co
 
 /* ---- 算法实验页 ---- */
 .best-row { background: rgba(27, 130, 120, .07); }
+.ml-predict-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); gap: 18px; }
+.ml-slider { display: grid; grid-template-columns: 66px 1fr 46px; align-items: center; gap: 10px; font-size: 11px; color: var(--muted); margin: 9px 0; }
+.ml-slider input[type="range"] { width: 100%; accent-color: var(--teal); }
+.ml-slider b { color: var(--deep); text-align: right; }
+@media (max-width: 900px) { .ml-predict-grid { grid-template-columns: 1fr; } }

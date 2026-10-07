@@ -22,6 +22,87 @@ sys.path.insert(0, str(PROJECT_ROOT / "algorithm"))
 
 from clustering import kmeans  # noqa: E402  共享聚类模块位于 algorithm/
 from data_cleaning import clean_weather_frame  # noqa: E402  共享清洗模块位于 algorithm/
+
+RAIN_MODEL_DIR = PROJECT_ROOT / "algorithm" / "ml_models"
+_rain_predictor: "RainPredictor | None" = None
+_rain_predictor_failed = False
+
+
+class RainPredictor:
+    """加载 ml_train.py 持久化的最佳降水模型，提供在线推理。"""
+
+    def __init__(self, model_dir: Path) -> None:
+        import joblib
+
+        self.model = joblib.load(model_dir / "rain_model.joblib")
+        meta = json.loads((model_dir / "rain_model_meta.json").read_text(encoding="utf-8"))
+        self.name = meta["best_name"]
+        self.features = meta["features"]
+        self.medians = meta["medians"]
+
+    def predict(self, frame: pd.DataFrame) -> np.ndarray:
+        """frame 需含全部特征列；缺失值按训练集中位数填补。"""
+        X = frame[self.features].fillna(pd.Series(self.medians))
+        return self.model.predict_proba(X)[:, 1]
+
+    def manual_frame(self, values: dict[str, Any]) -> pd.DataFrame:
+        """把前端滑块的少量手动参数补全成完整特征行（缺省取训练集中位数）。"""
+        median = self.medians
+        month = float(values.get("month") or pd.Timestamp.now().month)
+        temperature = float(values.get("temperature", median["temperature_celsius"]))
+        humidity = float(values.get("humidity", median["humidity"]))
+        cloud = float(values.get("cloud", median["cloud"]))
+        wind = float(values.get("wind", median["wind_kph"]))
+        gust = float(values.get("gust", wind * 1.4))
+        row = {
+            "temperature_celsius": temperature,
+            "feels_like_celsius": float(values.get("feels_like", temperature)),
+            "feels_temp_diff": float(values.get("feels_like", temperature)) - temperature,
+            "humidity": humidity,
+            "cloud": cloud,
+            "dew_spread_proxy": humidity * cloud / 100.0,
+            "pressure_mb": float(values.get("pressure", median["pressure_mb"])),
+            "wind_kph": wind,
+            "gust_kph": gust,
+            "gust_wind_ratio": gust / wind if wind else median["gust_wind_ratio"],
+            "visibility_km": float(values.get("visibility", median["visibility_km"])),
+            "uv_index": float(values.get("uv", median["uv_index"])),
+            "month_sin": np.sin(2 * np.pi * month / 12),
+            "month_cos": np.cos(2 * np.pi * month / 12),
+            "air_quality_PM2.5": float(values.get("pm25", median["air_quality_PM2.5"])),
+            "air_quality_PM10": float(values.get("pm10", median["air_quality_PM10"])),
+            "air_quality_Ozone": float(values.get("ozone", median["air_quality_Ozone"])),
+        }
+        return pd.DataFrame([row])
+
+
+def get_rain_predictor() -> RainPredictor | None:
+    """首次调用时加载持久化模型；加载失败（未训练/缺依赖）返回 None 并缓存失败状态。"""
+    global _rain_predictor, _rain_predictor_failed
+    if _rain_predictor is not None:
+        return _rain_predictor
+    if _rain_predictor_failed:
+        return None
+    try:
+        _rain_predictor = RainPredictor(RAIN_MODEL_DIR)
+        print(f"[weather-system] 降水模型已加载：{_rain_predictor.name}")
+        return _rain_predictor
+    except Exception as exc:  # noqa: BLE001  缺模型或缺依赖都应在页面给出友好提示
+        print(f"[weather-system] 降水模型加载失败：{exc}")
+        _rain_predictor_failed = True
+        return None
+
+
+def engineer_weather_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """按训练阶段（ml_train.load_dataset）一致的规则派生特征列。"""
+    frame = frame.copy()
+    month = frame["observed_at_utc"].dt.month
+    frame["month_sin"] = np.sin(2 * np.pi * month / 12)
+    frame["month_cos"] = np.cos(2 * np.pi * month / 12)
+    frame["feels_temp_diff"] = frame["feels_like_celsius"] - frame["temperature_celsius"]
+    frame["gust_wind_ratio"] = frame["gust_kph"] / frame["wind_kph"].replace(0, np.nan)
+    frame["dew_spread_proxy"] = frame["humidity"] * frame["cloud"] / 100.0
+    return frame
 DEFAULT_DATA_PATH = PROJECT_ROOT / "data" / "raw" / "GlobalWeatherRepository.csv"
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 FIGURES_DIR = PROJECT_ROOT / "figures"
@@ -422,6 +503,14 @@ class WeatherStore:
             ]
         record["pm25_annual"] = round(float(climate_row["pm25"]), 1)
         record["city_key"] = city_key
+        predictor = get_rain_predictor()
+        record["rain_probability"] = None
+        if predictor is not None:
+            try:
+                engineered = engineer_weather_features(row)
+                record["rain_probability"] = round(float(predictor.predict(engineered)[0]) * 100, 1)
+            except Exception:  # noqa: BLE001  模型不可用时对比页该列显示 "-"
+                pass
         return record
 
     def _standardized_climate(self) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -805,6 +894,19 @@ class WeatherRequestHandler(SimpleHTTPRequestHandler):
                     self.server.session_tokens.discard(token)  # type: ignore[attr-defined]
                 self.send_json({"code": 200, "message": "已退出登录"})
                 return
+            if parsed.path == "/api/ml/predict":
+                predictor = get_rain_predictor()
+                if predictor is None:
+                    self.send_json({"available": False, "message": "降水模型不存在：请先运行 python algorithm/ml_train.py"})
+                    return
+                values = self.read_json_body()
+                probability = float(predictor.predict(predictor.manual_frame(values))[0])
+                self.send_json({
+                    "available": True, "model": predictor.name,
+                    "probability": round(probability * 100, 1),
+                    "label": "降水" if probability >= 0.5 else "无降水",
+                })
+                return
             if parsed.path == "/api/admin/reload":
                 if not self.require_auth():
                     self.send_json({"code": 401, "message": "请先登录后再重载数据"}, status=401)
@@ -961,6 +1063,71 @@ class WeatherRequestHandler(SimpleHTTPRequestHandler):
                     })
                     return
                 self.send_json({"available": True, "metrics": json.loads(metrics_path.read_text(encoding="utf-8"))})
+                return
+            if parsed.path == "/api/ml/predict":
+                predictor = get_rain_predictor()
+                if predictor is None:
+                    self.send_json({"available": False, "message": "降水模型不存在：请先运行 python algorithm/ml_train.py"})
+                    return
+                key = self._query_text(query, "k")
+                row = self.server.store.latest[self.server.store.latest["city_key"] == key]
+                if row.empty:
+                    self.send_json({"error": f"未知城市：{key or '(未指定)'}"}, status=404)
+                    return
+                row = row.iloc[[0]].copy()
+                engineered = engineer_weather_features(row)
+                probability = float(predictor.predict(engineered)[0])
+                frame = self.server.store.frame
+                drivers = []
+                for column, label in [("humidity", "湿度"), ("cloud", "云量"), ("visibility_km", "能见度"),
+                                      ("pressure_mb", "气压"), ("temperature_celsius", "温度"), ("wind_kph", "风速")]:
+                    value = float(row.iloc[0][column])
+                    mean = float(frame[column].mean())
+                    std = float(frame[column].std()) or 1.0
+                    drivers.append({"feature": label, "value": round(value, 1), "z": round((value - mean) / std, 2)})
+                inputs = {
+                    "month": int(row.iloc[0]["observed_at_utc"].month),
+                    "temperature": round(float(row.iloc[0]["temperature_celsius"]), 1),
+                    "humidity": int(float(row.iloc[0]["humidity"])),
+                    "cloud": int(float(row.iloc[0]["cloud"])),
+                    "pressure": int(float(row.iloc[0]["pressure_mb"])),
+                    "wind": round(float(row.iloc[0]["wind_kph"]), 1),
+                    "visibility": round(float(row.iloc[0]["visibility_km"]), 1),
+                    "uv": round(float(row.iloc[0]["uv_index"]), 1),
+                    "pm25": round(float(row.iloc[0]["air_quality_PM2.5"]), 1),
+                    "pm10": round(float(row.iloc[0]["air_quality_PM10"]), 1),
+                }
+                self.send_json({
+                    "available": True, "model": predictor.name, "city_key": key,
+                    "city": str(row.iloc[0]["location_name"]), "country": str(row.iloc[0]["country"]),
+                    "probability": round(probability * 100, 1),
+                    "label": "降水" if probability >= 0.5 else "无降水",
+                    "inputs": inputs, "drivers": drivers,
+                })
+                return
+            if parsed.path == "/api/ml/risk_rank":
+                predictor = get_rain_predictor()
+                if predictor is None:
+                    self.send_json({"available": False, "message": "降水模型不存在：请先运行 python algorithm/ml_train.py"})
+                    return
+                limit = max(3, min(self._query_int(query, "limit", 10), 30))
+                latest = engineer_weather_features(self.server.store.latest)
+                probabilities = predictor.predict(latest)
+                ranked = latest.assign(probability=probabilities).sort_values("probability", ascending=False).head(limit)
+                items = [
+                    {
+                        "city_key": row.city_key,
+                        "country": row.country,
+                        "city": row.location_name,
+                        "probability": round(float(row.probability) * 100, 1),
+                        "temperature": round(float(row.temperature_celsius), 1),
+                        "humidity": int(float(row.humidity)),
+                        "cloud": int(float(row.cloud)),
+                        "condition": str(row.condition_normalized),
+                    }
+                    for row in ranked.itertuples()
+                ]
+                self.send_json({"available": True, "model": predictor.name, "items": items})
                 return
             if parsed.path.startswith("/figures/"):
                 filename = Path(unquote(parsed.path.removeprefix("/figures/"))).name

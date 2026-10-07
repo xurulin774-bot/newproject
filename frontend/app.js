@@ -18,6 +18,7 @@ const state = {
   recommendQuery: "",
   similarQuery: "",
   similarResult: null,
+  mlTimer: null,
   planMonth: new Date().getMonth() + 1,
   planMode: "comfort",
   planItems: null,
@@ -653,7 +654,7 @@ function renderCompareResult() {
   const metrics = [
     ["温度", "temperature", "°C"], ["体感", "feels_like", "°C"], ["湿度", "humidity", "%"],
     ["降水", "precipitation", "mm"], ["风速", "wind", "kph"], ["能见度", "visibility", "km"],
-    ["紫外线", "uv", ""], ["PM2.5", "pm25", ""],
+    ["紫外线", "uv", ""], ["PM2.5", "pm25", ""], ["降水概率(模型)", "rain_probability", "%"],
   ];
   container.innerHTML = `
     <div class="dashboard-grid"><section class="content-card"><div class="card-heading"><div><p class="kicker">MONTHLY PROFILE</p><h2>逐月平均气温对比</h2></div></div><div id="compare-months" class="echart-box"></div></section>
@@ -920,7 +921,12 @@ function renderMlResult(m) {
   const root = document.getElementById("ml-root");
   const bestKey = (m.best_model || "").trim();
   root.innerHTML = `
-    <div class="metric-grid">
+    <div class="dashboard-grid">
+      <section class="content-card"><div class="card-heading"><div><p class="kicker">LIVE INFERENCE</p><h2>实时降水概率预测器</h2></div><span class="muted" id="ml-mode-hint">正在加载...</span></div><div id="ml-gauge" style="height:200px"></div><div class="filter-bar" style="margin-top:6px"><label class="search-field"><span>⌕</span><input id="ml-city-search" placeholder="搜索城市读取最新观测" /></label><button class="primary-button" id="ml-city-search-button">读取</button></div><div id="ml-city-chips" class="chip-row"></div><div id="ml-drivers" class="chip-row"></div></section>
+      <section class="content-card"><div class="card-heading"><div><p class="kicker">MANUAL INPUT</p><h2>手动参数预测</h2></div><span class="muted">拖动滑块实时调用模型</span></div><div id="ml-sliders"></div></section>
+    </div>
+    <section class="content-card" style="margin-top:18px"><div class="card-heading"><div><p class="kicker">RAIN RISK RANK</p><h2>全城降水风险榜</h2></div><span class="muted" id="ml-risk-model">模型推理 · 最新观测</span></div><div class="compact-list" id="ml-risk-list"><span class="muted">加载中...</span></div></section>
+    <div class="metric-grid" style="margin-top:18px">
       ${metricCard("预测任务", "降水预测", `标签规则 precip_mm > ${m.label_threshold}`)}
       ${metricCard("训练样本", fmt(m.train, 0), `测试集 ${fmt(m.test, 0)} 条（分层抽样）`)}
       ${metricCard("特征维度", fmt(m.features.length, 0), "含时间周期与衍生特征")}
@@ -931,6 +937,127 @@ function renderMlResult(m) {
     <section class="content-card" style="margin-top:18px"><div class="card-heading"><div><p class="kicker">VISUALIZATIONS</p><h2>训练与评估可视化</h2></div><span class="muted">由 algorithm/ml_train.py 生成</span></div><div class="eda-grid" style="grid-template-columns:repeat(2,minmax(0,1fr))"><figure class="eda-card"><a href="/figures/ml_roc_curves.png" target="_blank"><img src="/figures/ml_roc_curves.png" alt="ROC 曲线" loading="lazy" /></a><figcaption><strong>ROC 曲线对比</strong><span>八种算法的受试者工作特征曲线与 AUC</span></figcaption></figure><figure class="eda-card"><a href="/figures/ml_confusion_matrix.png" target="_blank"><img src="/figures/ml_confusion_matrix.png" alt="混淆矩阵" loading="lazy" /></a><figcaption><strong>最佳模型混淆矩阵</strong><span>真负例 / 假正例 / 假负例 / 真正例</span></figcaption></figure><figure class="eda-card"><a href="/figures/ml_feature_importance.png" target="_blank"><img src="/figures/ml_feature_importance.png" alt="特征重要性" loading="lazy" /></a><figcaption><strong>特征重要性 Top10</strong><span>随机森林与 LightGBM 的对比</span></figcaption></figure><figure class="eda-card"><a href="/figures/ml_class_balance.png" target="_blank"><img src="/figures/ml_class_balance.png" alt="类别分布" loading="lazy" /></a><figcaption><strong>降水标签类别分布</strong><span>类别不平衡是召回率偏低的主要原因</span></figcaption></figure></div></section>
     <section class="notice-panel" style="margin-top:18px"><div><p class="kicker">REPRODUCE</p><strong>重新训练实验</strong><span>在项目根目录执行 python algorithm/ml_train.py，结果与图表自动更新；完整分析见 data/profile/ML_REPORT.md</span></div></section>`;
   mountMlChart(m);
+  mountMlPredictor();
+}
+
+// ---- 模型在线推理：城市预测 / 手动滑块 / 风险榜 ----
+
+const mlSliders = [
+  ["month", "月份", 1, 12, 1],
+  ["temperature", "温度 °C", -15, 45, 0.5],
+  ["humidity", "湿度 %", 0, 100, 1],
+  ["cloud", "云量 %", 0, 100, 1],
+  ["pressure", "气压 mb", 970, 1050, 1],
+  ["wind", "风速 kph", 0, 60, 0.5],
+  ["visibility", "能见度 km", 0, 24, 0.5],
+  ["pm25", "PM2.5", 0, 150, 1],
+];
+
+function mountMlPredictor() {
+  mountChart("ml-gauge", {
+    series: [{
+      type: "gauge", min: 0, max: 100, startAngle: 200, endAngle: -20, radius: "95%",
+      progress: { show: true, width: 14, itemStyle: { color: "#1b8278" } },
+      axisLine: { lineStyle: { width: 14, color: [[1, "#e1e9e6"]] } },
+      axisTick: { show: false }, splitLine: { show: false }, axisLabel: { show: false },
+      pointer: { show: false }, anchor: { show: false },
+      detail: { valueAnimation: true, fontSize: 28, offsetCenter: [0, "8%"], formatter: "{value}%", color: "#123c39" },
+      title: { fontSize: 11, offsetCenter: [0, "45%"], color: "#71807e" },
+      data: [{ value: 0, name: "降水概率" }],
+    }],
+  });
+  renderMlSliders(null);
+  document.getElementById("ml-city-search-button").addEventListener("click", searchMlCities);
+  document.getElementById("ml-city-search").addEventListener("keydown", (event) => { if (event.key === "Enter") searchMlCities(); });
+  loadMlRisk();
+  runMlCityPredict("China | Beijing");
+}
+
+function renderMlSliders(inputs) {
+  const box = document.getElementById("ml-sliders");
+  if (!box) return;
+  box.innerHTML = mlSliders.map(([key, label, min, max, step]) => {
+    const value = inputs && inputs[key] !== undefined ? inputs[key] : null;
+    const fallback = key === "month" ? new Date().getMonth() + 1 : Math.round((min + max) / 2);
+    const shown = value ?? fallback;
+    return `<div class="ml-slider"><span>${label}</span><input type="range" data-ml-slider="${key}" min="${min}" max="${max}" step="${step}" value="${shown}" /><b id="ml-val-${key}">${shown}</b></div>`;
+  }).join("");
+  box.querySelectorAll("[data-ml-slider]").forEach((slider) => slider.addEventListener("input", () => {
+    document.getElementById(`ml-val-${slider.dataset.mlSlider}`).textContent = slider.value;
+    scheduleManualPredict();
+  }));
+}
+
+function collectMlSliders() {
+  const values = {};
+  mlSliders.forEach(([key]) => {
+    const slider = document.querySelector(`[data-ml-slider="${key}"]`);
+    if (slider) values[key] = Number(slider.value);
+  });
+  return values;
+}
+
+function updateMlGauge(probability, mode) {
+  const chart = window.echarts ? echarts.getInstanceByDom(document.getElementById("ml-gauge")) : null;
+  if (chart) {
+    chart.setOption({
+      series: [{
+        data: [{ value: probability, name: "降水概率" }],
+        progress: { show: true, width: 14, itemStyle: { color: probability >= 50 ? "#dd765b" : "#1b8278" } },
+      }],
+    });
+  }
+  const hint = document.getElementById("ml-mode-hint");
+  if (hint) hint.textContent = `${mode} · 预测：${probability >= 50 ? "降水" : "无降水"}`;
+}
+
+function scheduleManualPredict() {
+  clearTimeout(state.mlTimer);
+  state.mlTimer = setTimeout(async () => {
+    try {
+      const result = await api("/api/ml/predict", { method: "POST", body: JSON.stringify(collectMlSliders()) });
+      if (result.available) updateMlGauge(result.probability, "手动参数");
+    } catch (error) { /* 滑块连续拖动期间静默失败 */ }
+  }, 250);
+}
+
+async function searchMlCities() {
+  const query = document.getElementById("ml-city-search").value.trim();
+  const box = document.getElementById("ml-city-chips");
+  if (!box) return;
+  box.innerHTML = '<span class="muted">搜索中...</span>';
+  try {
+    const result = await api(`/api/cities?q=${encodeURIComponent(query)}&limit=8`);
+    const items = result.items || [];
+    box.innerHTML = items.length
+      ? items.map((item) => `<button class="chip" data-key="${esc(`${item.country} | ${item.city}`)}">${esc(displayCity(item.city))} · ${esc(displayCountry(item.country))}</button>`).join("")
+      : '<span class="muted">没有匹配的城市</span>';
+    box.querySelectorAll(".chip").forEach((chip) => chip.addEventListener("click", () => runMlCityPredict(chip.dataset.key)));
+  } catch (error) { box.innerHTML = `<span class="warning-text">${esc(error.message)}</span>`; }
+}
+
+async function runMlCityPredict(key) {
+  const drivers = document.getElementById("ml-drivers");
+  try {
+    const result = await api(`/api/ml/predict?k=${encodeURIComponent(key)}`);
+    if (!result.available) { if (drivers) drivers.innerHTML = `<span class="warning-text">${esc(result.message)}</span>`; return; }
+    updateMlGauge(result.probability, `${displayCity(result.city)} 最新观测`);
+    renderMlSliders(result.inputs);
+    if (drivers) {
+      drivers.innerHTML = result.drivers.map((item) => `<span class="chip ${Math.abs(item.z) >= 1 ? "active" : ""}" title="相对全量均值偏离 ${item.z}σ">${esc(item.feature)} ${fmt(item.value)}（${item.z >= 0 ? "+" : ""}${item.z}σ）</span>`).join("");
+    }
+  } catch (error) { if (drivers) drivers.innerHTML = `<span class="warning-text">${esc(error.message)}</span>`; }
+}
+
+async function loadMlRisk() {
+  try {
+    const result = await api("/api/ml/risk_rank?limit=10");
+    const list = document.getElementById("ml-risk-list");
+    if (!list) return;
+    if (!result.available) { list.innerHTML = `<span class="warning-text">${esc(result.message)}</span>`; return; }
+    document.getElementById("ml-risk-model").textContent = `模型：${result.model} · 按预测降水概率排序`;
+    list.innerHTML = result.items.map((item, index) => `<div class="compact-item"><span class="compact-rank">${String(index + 1).padStart(2, "0")}</span><div><strong>${esc(displayCity(item.city))}</strong><small>${esc(displayCountry(item.country))} · ${esc(displayCondition(item.condition))} · ${fmt(item.temperature)}°C · 湿度 ${item.humidity}%</small></div><b>${fmt(item.probability)}<em>%</em></b></div>`).join("");
+  } catch (error) { /* 列表加载失败不影响主页面 */ }
 }
 
 function mountMlChart(m) {

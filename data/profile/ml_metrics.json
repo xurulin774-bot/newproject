@@ -48,7 +48,7 @@
       "recall": 0.4211,
       "f1": 0.4918,
       "auc": 0.8503,
-      "train_seconds": 0.16
+      "train_seconds": 0.12
     },
     {
       "key": "random_forest",
@@ -58,7 +58,7 @@
       "recall": 0.3994,
       "f1": 0.5163,
       "auc": 0.8972,
-      "train_seconds": 1.07
+      "train_seconds": 0.93
     },
     {
       "key": "knn",
@@ -88,7 +88,7 @@
       "recall": 0.2876,
       "f1": 0.407,
       "auc": 0.837,
-      "train_seconds": 5.97
+      "train_seconds": 5.54
     },
     {
       "key": "gradient_boosting",
@@ -98,7 +98,7 @@
       "recall": 0.3547,
       "f1": 0.4743,
       "auc": 0.8872,
-      "train_seconds": 9.57
+      "train_seconds": 9.59
     },
     {
       "key": "lightgbm",
@@ -108,7 +108,7 @@
       "recall": 0.4801,
       "f1": 0.5724,
       "auc": 0.9062,
-      "train_seconds": 0.78
+      "train_seconds": 0.92
     }
   ],
   "best_model": "LightGBM",

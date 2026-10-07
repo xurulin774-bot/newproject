@@ -23,6 +23,7 @@
 - 城市对比：1~4 个城市的逐月气温曲线、指标雷达图与温度趋势外推（30 日滑动平均 + 线性回归，演示用途）。
 - 气候分区：纯 numpy 实现的 KMeans（k-means++ 初始化）将 239 城聚为 5 个气候带，EDA 页地图按带着色。
 - 算法实验（实验三）：降水预测二分类任务，实现 8 种算法（逻辑回归/决策树/随机森林/KNN/朴素贝叶斯/SVM/梯度提升/LightGBM）的训练、评估（准确率/精确率/召回率/F1/AUC）与可视化对比，结果在"算法实验"页展示，完整分析见 `data/profile/ML_REPORT.md`。
+- 模型在线推理：训练脚本持久化最佳模型（`algorithm/ml_models/`），后端懒加载提供实时预测——"算法实验"页含交互式降水概率预测器（城市最新观测 / 手动滑块参数）与全城降水风险榜，城市对比页展示每城模型预测的降水概率。
 - 仪表盘与 EDA 图谱页使用 ECharts 交互图表（悬停提示、区域缩放、图例开关），图表数据由 `/api/eda` 提供；原始 PNG 图仍保留在 `figures/` 供报告引用。
 - 保留机器可读的数据质量报告。
 - 内置登录认证（本地演示账号 `admin / 123456`），支持替换数据集后的免重启热重载。
@@ -99,6 +100,9 @@ EDA 脚本会校验必需字段；后端启动时也会在字段缺失时给出�
 - `GET /api/forecast?k=China|Beijing&days=30`（温度趋势外推，k 省略时为全球平均）
 - `GET /api/clusters?k=5`（KMeans 气候分区）
 - `GET /api/ml`（实验三 8 种算法的评估指标，由 `algorithm/ml_train.py` 生成）
+- `GET /api/ml/predict?k=China|Beijing`（最佳模型对城市最新观测的降水概率）
+- `POST /api/ml/predict`（手动参数实时预测，请求体如 `{"month":7,"humidity":92,"cloud":95}`）
+- `GET /api/ml/risk_rank?limit=10`（全城降水风险榜）
 - `GET /api/eda`（交互图表聚合数据：时序、相关性、空气质量、空间分布等）
 - `POST /api/admin/reload`（需登录：替换 data/raw 下 CSV 后热重载，无需重启）
 

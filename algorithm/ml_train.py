@@ -13,6 +13,7 @@
     figures/ml_*.png                     模型对比 / ROC / 混淆矩阵 / 特征重要性
     data/profile/ml_metrics.json         机器可读指标（供前端"算法实验"页展示）
     data/profile/ML_REPORT.md            实验结果分析素材
+    algorithm/ml_models/                 最佳模型持久化（供后端在线推理）
 """
 
 from __future__ import annotations
@@ -325,6 +326,22 @@ def main() -> None:
     plot_feature_importance(fitted, features, args.figures_dir)
 
     balance = {"无降水": int((y == 0).sum()), "降水": int((y == 1).sum())}
+
+    # ---- 持久化最佳模型，供后端在线推理（降水概率预测器 / 风险榜） ----
+    import joblib
+
+    model_dir = PROJECT_ROOT / "algorithm" / "ml_models"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    joblib.dump(fitted[best["key"]], model_dir / "rain_model.joblib")
+    (model_dir / "rain_model_meta.json").write_text(json.dumps({
+        "best_key": best["key"],
+        "best_name": best_result["name"],
+        "features": features,
+        "medians": {column: round(float(X[column].median()), 4) for column in features},
+        "f1": best["f1"], "auc": best["auc"],
+        "trained_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
     metrics = {
         "task": "降水预测（二分类）",
         "label_threshold": LABEL_THRESHOLD,
