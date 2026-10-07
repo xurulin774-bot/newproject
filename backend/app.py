@@ -950,7 +950,17 @@ class WeatherRequestHandler(SimpleHTTPRequestHandler):
                     self.send_json({"error": f"未知城市：{key}"}, status=404)
                 return
             if parsed.path == "/api/clusters":
-                self.send_json(self.server.store.clusters(self._query_int(query, "k", 5)))
+                self.send_json(self.store.clusters(self._query_int(query, "k", 5)))
+                return
+            if parsed.path == "/api/ml":
+                metrics_path = PROJECT_ROOT / "data" / "profile" / "ml_metrics.json"
+                if not metrics_path.exists():
+                    self.send_json({
+                        "available": False,
+                        "message": "尚未训练模型：请先运行 python algorithm/ml_train.py",
+                    })
+                    return
+                self.send_json({"available": True, "metrics": json.loads(metrics_path.read_text(encoding="utf-8"))})
                 return
             if parsed.path.startswith("/figures/"):
                 filename = Path(unquote(parsed.path.removeprefix("/figures/"))).name

@@ -35,6 +35,7 @@ const routes = {
   "/similar": { title: "相似城市", section: "智能推荐" },
   "/plan": { title: "出行规划", section: "智能推荐" },
   "/eda": { title: "EDA 分析图谱", section: "分析洞察" },
+  "/ml": { title: "算法实验", section: "分析洞察" },
   "/quality": { title: "数据质量检查", section: "分析洞察" },
   "/system": { title: "系统说明", section: "系统管理" },
 };
@@ -63,6 +64,7 @@ const navGroups = [
     label: "分析洞察",
     items: [
       { path: "/eda", icon: "◫", label: "EDA 分析" },
+      { path: "/ml", icon: "⚗", label: "算法实验" },
       { path: "/quality", icon: "✓", label: "数据质量" },
     ],
   },
@@ -893,6 +895,61 @@ function clusterMapOption(clusters) {
   };
 }
 
+// ---------------- 算法实验（实验三：人工智能算法） ----------------
+
+function renderMlPage() {
+  const root = document.getElementById("page-root");
+  root.innerHTML = `${pageHeader("MACHINE LEARNING EXPERIMENT", "算法实验 · 降水预测", "实验三：对清洗后的天气数据做特征工程，训练并对比 8 种人工智能算法，评估准确率、精确率、召回率与 AUC。", '<span class="rule-badge">scikit-learn + LightGBM</span>')}<div id="ml-root"><div class="loading-state"><span class="spinner"></span>正在加载实验结果...</div></div>`;
+  loadMlResult();
+}
+
+async function loadMlResult() {
+  const root = document.getElementById("ml-root");
+  if (!root) return;
+  try {
+    const result = await api("/api/ml");
+    if (!result.available) {
+      root.innerHTML = `<div class="error-panel"><strong>实验结果尚未生成</strong><p>${esc(result.message)}</p></div>`;
+      return;
+    }
+    renderMlResult(result.metrics);
+  } catch (error) { root.innerHTML = `<div class="error-panel"><strong>加载失败</strong><p>${esc(error.message)}</p></div>`; }
+}
+
+function renderMlResult(m) {
+  const root = document.getElementById("ml-root");
+  const bestKey = (m.best_model || "").trim();
+  root.innerHTML = `
+    <div class="metric-grid">
+      ${metricCard("预测任务", "降水预测", `标签规则 precip_mm > ${m.label_threshold}`)}
+      ${metricCard("训练样本", fmt(m.train, 0), `测试集 ${fmt(m.test, 0)} 条（分层抽样）`)}
+      ${metricCard("特征维度", fmt(m.features.length, 0), "含时间周期与衍生特征")}
+      ${metricCard("降水占比", `${(m.class_balance["降水"] / (m.class_balance["降水"] + m.class_balance["无降水"]) * 100).toFixed(1)}%`, `无降水 ${fmt(m.class_balance["无降水"], 0)} 条`, "clean")}
+    </div>
+    <section class="content-card"><div class="card-heading"><div><p class="kicker">MODEL COMPARISON</p><h2>八种算法性能对比</h2></div><span class="muted">测试集 ${fmt(m.test, 0)} 条 · 悬停查看数值</span></div><div id="ml-compare" class="echart-box" style="height:320px"></div></section>
+    <section class="content-card" style="margin-top:18px"><div class="card-heading"><div><p class="kicker">EVALUATION TABLE</p><h2>评估指标明细</h2></div><span class="muted">最佳模型按 F1 选取：${esc(bestKey)}</span></div><div class="table-wrap"><table><thead><tr><th>算法</th><th>准确率</th><th>精确率</th><th>召回率</th><th>F1</th><th>AUC</th><th>训练耗时</th></tr></thead><tbody>${m.models.map((item) => `<tr class="${item.name === bestKey ? "best-row" : ""}"><td><strong>${esc(item.name)}</strong>${item.name === bestKey ? ' <span class="quality-badge" style="margin-left:6px">最佳</span>' : ""}</td><td class="number-cell">${item.accuracy.toFixed(4)}</td><td class="number-cell">${item.precision.toFixed(4)}</td><td class="number-cell">${item.recall.toFixed(4)}</td><td class="number-cell">${item.f1.toFixed(4)}</td><td class="number-cell">${item.auc.toFixed(4)}</td><td class="number-cell">${item.train_seconds}s</td></tr>`).join("")}</tbody></table></div></section>
+    <section class="content-card" style="margin-top:18px"><div class="card-heading"><div><p class="kicker">VISUALIZATIONS</p><h2>训练与评估可视化</h2></div><span class="muted">由 algorithm/ml_train.py 生成</span></div><div class="eda-grid" style="grid-template-columns:repeat(2,minmax(0,1fr))"><figure class="eda-card"><a href="/figures/ml_roc_curves.png" target="_blank"><img src="/figures/ml_roc_curves.png" alt="ROC 曲线" loading="lazy" /></a><figcaption><strong>ROC 曲线对比</strong><span>八种算法的受试者工作特征曲线与 AUC</span></figcaption></figure><figure class="eda-card"><a href="/figures/ml_confusion_matrix.png" target="_blank"><img src="/figures/ml_confusion_matrix.png" alt="混淆矩阵" loading="lazy" /></a><figcaption><strong>最佳模型混淆矩阵</strong><span>真负例 / 假正例 / 假负例 / 真正例</span></figcaption></figure><figure class="eda-card"><a href="/figures/ml_feature_importance.png" target="_blank"><img src="/figures/ml_feature_importance.png" alt="特征重要性" loading="lazy" /></a><figcaption><strong>特征重要性 Top10</strong><span>随机森林与 LightGBM 的对比</span></figcaption></figure><figure class="eda-card"><a href="/figures/ml_class_balance.png" target="_blank"><img src="/figures/ml_class_balance.png" alt="类别分布" loading="lazy" /></a><figcaption><strong>降水标签类别分布</strong><span>类别不平衡是召回率偏低的主要原因</span></figcaption></figure></div></section>
+    <section class="notice-panel" style="margin-top:18px"><div><p class="kicker">REPRODUCE</p><strong>重新训练实验</strong><span>在项目根目录执行 python algorithm/ml_train.py，结果与图表自动更新；完整分析见 data/profile/ML_REPORT.md</span></div></section>`;
+  mountMlChart(m);
+}
+
+function mountMlChart(m) {
+  const el = document.getElementById("ml-compare");
+  if (!el) return;
+  const metricDefs = [["accuracy", "准确率", "#1b8278"], ["precision", "精确率", "#4c80ba"], ["recall", "召回率", "#d5a842"], ["f1", "F1", "#dd765b"]];
+  mountChart("ml-compare", {
+    tooltip: { trigger: "axis", textStyle: { fontSize: 11 } },
+    legend: { top: 0, textStyle: { fontSize: 10 } },
+    grid: { left: 44, right: 14, top: 34, bottom: 30 },
+    xAxis: { type: "category", data: m.models.map((item) => item.name), axisLabel: { fontSize: 10 }, axisLine: { lineStyle: { color: "#d7e2dd" } } },
+    yAxis: { type: "value", max: 1, axisLabel: { fontSize: 10 }, splitLine: { lineStyle: { color: "#e7efec" } } },
+    series: metricDefs.map(([key, label, color]) => ({
+      name: label, type: "bar", barWidth: 14, data: m.models.map((item) => item[key]),
+      itemStyle: { color, borderRadius: [3, 3, 0, 0] },
+    })),
+  });
+}
+
 function renderQuality() {
   const s = state.summary || {};
   const c = state.cleaning || {};
@@ -950,6 +1007,7 @@ async function renderPage() {
     } catch (error) { renderError(error.message); }
     return;
   }
+  if (state.route === "/ml") { renderMlPage(); return; }
   if (state.route === "/quality") {
     try {
       const [summary, cleaning] = await Promise.all([

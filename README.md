@@ -22,6 +22,7 @@
 - 出行规划：选择出行月份，用各城市历史同期均值进行规则评分。
 - 城市对比：1~4 个城市的逐月气温曲线、指标雷达图与温度趋势外推（30 日滑动平均 + 线性回归，演示用途）。
 - 气候分区：纯 numpy 实现的 KMeans（k-means++ 初始化）将 239 城聚为 5 个气候带，EDA 页地图按带着色。
+- 算法实验（实验三）：降水预测二分类任务，实现 8 种算法（逻辑回归/决策树/随机森林/KNN/朴素贝叶斯/SVM/梯度提升/LightGBM）的训练、评估（准确率/精确率/召回率/F1/AUC）与可视化对比，结果在"算法实验"页展示，完整分析见 `data/profile/ML_REPORT.md`。
 - 仪表盘与 EDA 图谱页使用 ECharts 交互图表（悬停提示、区域缩放、图例开关），图表数据由 `/api/eda` 提供；原始 PNG 图仍保留在 `figures/` 供报告引用。
 - 保留机器可读的数据质量报告。
 - 内置登录认证（本地演示账号 `admin / 123456`），支持替换数据集后的免重启热重载。
@@ -34,9 +35,10 @@ weather-system/
 ├── algorithm/run_eda.py              # 可复用 EDA 脚本
 ├── algorithm/data_cleaning.py        # 共享数据清洗模块（后端与 EDA 共用）
 ├── algorithm/clustering.py           # KMeans 聚类（纯 numpy，k-means++ 初始化）
+├── algorithm/ml_train.py             # 实验三：8 种机器学习算法训练/评估/可视化
 ├── backend/app.py                    # 本地 API 和静态文件服务
 ├── data/raw/GlobalWeatherRepository.csv
-├── data/profile/                     # 数据概况与 EDA 报告
+├── data/profile/                     # 数据概况、EDA 报告与算法实验指标（ml_metrics.json / ML_REPORT.md）
 ├── figures/                          # EDA PNG 图
 ├── frontend/                         # 无构建依赖的网页
 ├── frontend/vendor/                  # ECharts 5.5 与世界地图 GeoJSON（本地化，离线可用）
@@ -96,6 +98,7 @@ EDA 脚本会校验必需字段；后端启动时也会在字段缺失时给出�
 - `GET /api/compare?k=China|Beijing&k=France|Paris`（1~4 城画像对比）
 - `GET /api/forecast?k=China|Beijing&days=30`（温度趋势外推，k 省略时为全球平均）
 - `GET /api/clusters?k=5`（KMeans 气候分区）
+- `GET /api/ml`（实验三 8 种算法的评估指标，由 `algorithm/ml_train.py` 生成）
 - `GET /api/eda`（交互图表聚合数据：时序、相关性、空气质量、空间分布等）
 - `POST /api/admin/reload`（需登录：替换 data/raw 下 CSV 后热重载，无需重启）
 

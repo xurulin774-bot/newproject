@@ -310,3 +310,6 @@ code, .code-line { color: var(--teal-dark); background: #edf6f3; font-family: Co
 .chip { padding: 5px 12px; border: 1px solid var(--line); border-radius: 14px; font-size: 11px; background: #fff; color: var(--ink); cursor: pointer; }
 .chip:hover { border-color: var(--teal); }
 .chip.active { border-color: var(--teal); color: var(--teal); background: rgba(27, 130, 120, .06); }
+
+/* ---- 算法实验页 ---- */
+.best-row { background: rgba(27, 130, 120, .07); }

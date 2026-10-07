@@ -1,0 +1,125 @@
+{
+  "task": "降水预测（二分类）",
+  "label_threshold": 0.1,
+  "rows_total": 165952,
+  "locations": 268,
+  "train": 25000,
+  "test": 10000,
+  "random_state": 42,
+  "class_balance": {
+    "无降水": 139239,
+    "降水": 26713
+  },
+  "features": [
+    "temperature_celsius",
+    "feels_like_celsius",
+    "feels_temp_diff",
+    "humidity",
+    "cloud",
+    "dew_spread_proxy",
+    "pressure_mb",
+    "wind_kph",
+    "gust_kph",
+    "gust_wind_ratio",
+    "visibility_km",
+    "uv_index",
+    "month_sin",
+    "month_cos",
+    "air_quality_PM2.5",
+    "air_quality_PM10",
+    "air_quality_Ozone"
+  ],
+  "models": [
+    {
+      "key": "logistic_regression",
+      "name": "逻辑回归",
+      "accuracy": 0.8435,
+      "precision": 0.5404,
+      "recall": 0.187,
+      "f1": 0.2778,
+      "auc": 0.8419,
+      "train_seconds": 0.05
+    },
+    {
+      "key": "decision_tree",
+      "name": "决策树",
+      "accuracy": 0.8599,
+      "precision": 0.5911,
+      "recall": 0.4211,
+      "f1": 0.4918,
+      "auc": 0.8503,
+      "train_seconds": 0.16
+    },
+    {
+      "key": "random_forest",
+      "name": "随机森林",
+      "accuracy": 0.8795,
+      "precision": 0.7299,
+      "recall": 0.3994,
+      "f1": 0.5163,
+      "auc": 0.8972,
+      "train_seconds": 1.07
+    },
+    {
+      "key": "knn",
+      "name": "K近邻",
+      "accuracy": 0.8575,
+      "precision": 0.6297,
+      "recall": 0.2789,
+      "f1": 0.3866,
+      "auc": 0.8489,
+      "train_seconds": 0.01
+    },
+    {
+      "key": "naive_bayes",
+      "name": "朴素贝叶斯",
+      "accuracy": 0.6633,
+      "precision": 0.3042,
+      "recall": 0.8478,
+      "f1": 0.4478,
+      "auc": 0.8028,
+      "train_seconds": 0.01
+    },
+    {
+      "key": "svm",
+      "name": "支持向量机",
+      "accuracy": 0.8651,
+      "precision": 0.6962,
+      "recall": 0.2876,
+      "f1": 0.407,
+      "auc": 0.837,
+      "train_seconds": 5.97
+    },
+    {
+      "key": "gradient_boosting",
+      "name": "梯度提升",
+      "accuracy": 0.8734,
+      "precision": 0.7155,
+      "recall": 0.3547,
+      "f1": 0.4743,
+      "auc": 0.8872,
+      "train_seconds": 9.57
+    },
+    {
+      "key": "lightgbm",
+      "name": "LightGBM",
+      "accuracy": 0.8845,
+      "precision": 0.7085,
+      "recall": 0.4801,
+      "f1": 0.5724,
+      "auc": 0.9062,
+      "train_seconds": 0.78
+    }
+  ],
+  "best_model": "LightGBM",
+  "confusion_matrix": [
+    [
+      8072,
+      318
+    ],
+    [
+      837,
+      773
+    ]
+  ]
+}
