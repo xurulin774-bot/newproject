@@ -14,3 +14,9 @@ state.db
 .idea/
 .DS_Store
 Thumbs.db
+
+# docx 报告构建产物
+doc/_build/node_modules/
+doc/_build/package-lock.json
+doc/_pages/
+doc/*.pdf
