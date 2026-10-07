@@ -18,7 +18,8 @@
 - 加载时执行共享数据清洗（`algorithm/data_cleaning.py`）：国家名别名标准化、剔除城市身份错乱行、同城近距拼写归并，并输出清洗报告。
 - 展示全球温度趋势、天气状况分布和城市经纬度快照。
 - 根据舒适出行、空气质量、温暖晴朗、清凉避暑四种策略推荐城市。
-- 保留 9 张 EDA 图和机器可读的数据质量报告。
+- 仪表盘与 EDA 图谱页使用 ECharts 交互图表（悬停提示、区域缩放、图例开关），图表数据由 `/api/eda` 提供；原始 PNG 图仍保留在 `figures/` 供报告引用。
+- 保留机器可读的数据质量报告。
 - 内置登录认证（本地演示账号 `admin / 123456`）。
 - 使用 Python 标准库 HTTP 服务，不依赖 MySQL、Redis、Java 或前端构建工具。
 
@@ -33,6 +34,7 @@ weather-system/
 ├── data/profile/                     # 数据概况与 EDA 报告
 ├── figures/                          # EDA PNG 图
 ├── frontend/                         # 无构建依赖的网页
+├── frontend/vendor/                  # ECharts 5.5 与世界地图 GeoJSON（本地化，离线可用）
 ├── requirements.txt
 ├── run_eda.cmd
 └── start.cmd
@@ -82,6 +84,7 @@ EDA 脚本会校验必需字段；后端启动时也会在字段缺失时给出�
 - `GET /api/map`
 - `GET /api/cities?q=China&limit=20`
 - `GET /api/recommend?mode=comfort&limit=8`
+- `GET /api/eda`（交互图表聚合数据：时序、相关性、空气质量、空间分布等）
 
 ## 数据说明
 

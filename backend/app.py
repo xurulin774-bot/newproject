@@ -101,6 +101,7 @@ class WeatherStore:
         frame["condition_normalized"] = (
             frame["condition_text"].astype(str).str.strip().str.lower().str.title()
         )
+        frame["observed_month"] = frame["observed_at_local"].dt.month
         frame["city_key"] = (
             frame["country"].astype(str).str.strip()
             + " | "
@@ -116,6 +117,7 @@ class WeatherStore:
         self.daily = self._build_daily()
         self.conditions = self._build_conditions()
         self.summary = self._build_summary(data_path)
+        self._eda: dict[str, Any] | None = None
 
     def _build_daily(self) -> pd.DataFrame:
         return (
@@ -372,6 +374,105 @@ class WeatherStore:
             record["reason"] = "；".join(reasons[:3]) or "综合指标较均衡"
         return records
 
+    def eda_payload(self) -> dict[str, Any]:
+        """EDA 交互图表所需的聚合数据，首次访问时计算并缓存。"""
+
+        if self._eda is None:
+            self._eda = self._build_eda()
+        return self._eda
+
+    def _build_eda(self) -> dict[str, Any]:
+        frame = self.frame
+        temporal = [
+            {
+                "date": str(row.utc_date.date()),
+                "records": int(row.records),
+                "locations": int(row.locations),
+            }
+            for row in self.daily.itertuples()
+        ]
+        temperature_trend = [
+            {
+                "date": str(row.utc_date.date()),
+                "mean": round(float(row.temperature_mean), 2),
+                "p10": round(float(row.temperature_p10), 2),
+                "p90": round(float(row.temperature_p90), 2),
+            }
+            for row in self.daily.itertuples()
+        ]
+        top_keys = frame["city_key"].value_counts().head(8).index
+        sub = frame[frame["city_key"].isin(top_keys)]
+        seasonal_profiles = []
+        for key, group in sub.groupby("city_key"):
+            means = group.groupby("observed_month")["temperature_celsius"].mean()
+            seasonal_profiles.append(
+                {
+                    "city": str(group["location_name"].iloc[0]),
+                    "country": str(group["country"].iloc[0]),
+                    "months": [round(float(means.get(month)), 2) if month in means else None for month in range(1, 13)],
+                }
+            )
+        seasonal_profiles.sort(key=lambda item: -(item["months"][6] or -99))
+        conditions = [
+            {"condition": row.condition, "records": int(row.records), "share": round(float(row.share), 2)}
+            for row in self.conditions.head(12).itertuples()
+        ]
+        latest_air = self.latest[["air_quality_PM2.5", "air_quality_PM10", "air_quality_us-epa-index"]].apply(
+            pd.to_numeric, errors="coerce"
+        )
+        epa_counts = latest_air["air_quality_us-epa-index"].value_counts().sort_index()
+        air_quality = {
+            "scatter": [
+                {"pm25": round(float(row[0]), 1), "pm10": round(float(row[1]), 1)}
+                for row in latest_air[["air_quality_PM2.5", "air_quality_PM10"]].dropna().itertuples(index=False)
+            ],
+            "epa": [{"index": f"等级 {int(idx)}", "count": int(count)} for idx, count in epa_counts.items()],
+        }
+        numeric_fields = [
+            ("temperature_celsius", "温度"),
+            ("feels_like_celsius", "体感"),
+            ("humidity", "湿度"),
+            ("wind_kph", "风速"),
+            ("pressure_mb", "气压"),
+            ("precip_mm", "降水"),
+            ("visibility_km", "能见度"),
+            ("cloud", "云量"),
+            ("uv_index", "紫外线"),
+            ("air_quality_PM2.5", "PM2.5"),
+            ("air_quality_PM10", "PM10"),
+        ]
+        corr = frame[[column for column, _ in numeric_fields]].corr(method="pearson")
+        correlation = {
+            "fields": [label for _, label in numeric_fields],
+            "matrix": [[round(float(value), 3) for value in row] for row in corr.values],
+        }
+        humidity = pd.to_numeric(self.latest["humidity"], errors="coerce")
+        visibility = pd.to_numeric(self.latest["visibility_km"], errors="coerce")
+        precipitation = pd.to_numeric(self.latest["precip_mm"], errors="coerce")
+        bins = list(range(0, 101, 10))
+        comfort = []
+        for start, end in zip(bins[:-1], bins[1:]):
+            mask = (humidity >= start) & (humidity < end) if end < 100 else (humidity >= start) & (humidity <= end)
+            comfort.append(
+                {
+                    "bin": f"{start}-{end}%",
+                    "visibility": round(float(visibility[mask].mean()), 2) if mask.any() else None,
+                    "precipitation": round(float(precipitation[mask].mean()), 2) if mask.any() else None,
+                    "cities": int(mask.sum()),
+                }
+            )
+        return {
+            "temporal": temporal,
+            "temperature_trend": temperature_trend,
+            "seasonal_profiles": seasonal_profiles,
+            "conditions": conditions,
+            "air_quality": air_quality,
+            "correlation": correlation,
+            "geospatial": self._latest_records(sort=False),
+            "comfort": comfort,
+            "domain_checks": self.summary["quality_rules"],
+        }
+
 
 class WeatherRequestHandler(SimpleHTTPRequestHandler):
     """Serve the dashboard and the JSON endpoints from one local process."""
@@ -383,6 +484,13 @@ class WeatherRequestHandler(SimpleHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         # Keep the terminal readable while still reporting the request status.
         print(f"[weather-system] {self.address_string()} - {format % args}")
+
+    def end_headers(self) -> None:
+        # 本地演示服务：静态资源一律禁缓存，避免前端改版后浏览器仍使用旧文件。
+        # API 响应在 send_json/send_auth_json 中已单独设置 no-store。
+        if not self.path.startswith("/api/"):
+            self.send_header("Cache-Control", "no-store")
+        super().end_headers()
 
     def send_json(self, payload: Any, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False, default=json_default).encode("utf-8")
@@ -506,6 +614,9 @@ class WeatherRequestHandler(SimpleHTTPRequestHandler):
                 return
             if parsed.path == "/api/cleaning":
                 self.send_json({"report": self.store.cleaning_report})
+                return
+            if parsed.path == "/api/eda":
+                self.send_json(self.store.eda_payload())
                 return
             if parsed.path == "/api/trend":
                 self.send_json(

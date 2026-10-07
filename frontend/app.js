@@ -53,17 +53,73 @@ const navGroups = [
   },
 ];
 
-const edaFigures = [
-  ["01_temporal_coverage.png", "时间覆盖", "数据更新日期与记录规模"],
-  ["02_global_temperature_trend.png", "全球温度趋势", "每日温度均值及分位区间"],
-  ["03_seasonal_city_profiles.png", "城市季节画像", "不同城市的季节温度差异"],
-  ["04_weather_conditions.png", "天气状况分布", "天气文本条件的频数统计"],
-  ["05_air_quality.png", "空气质量分析", "PM2.5 与主要空气指标"],
-  ["06_feature_correlation.png", "特征相关性", "天气变量之间的相关关系"],
-  ["07_latest_geospatial_snapshot.png", "全球空间分布", "最新观测的城市坐标快照"],
-  ["08_humidity_precipitation_visibility.png", "环境指标关系", "湿度、降水与能见度"],
-  ["09_domain_quality_checks.png", "领域质量检查", "异常值规则检查结果"],
+const edaCharts = [
+  ["eda-temporal", "时间覆盖", "每日记录量与活跃城市数"],
+  ["eda-trend", "全球温度趋势", "每日温度均值及 10-90 分位区间"],
+  ["eda-seasonal", "城市季节画像", "观测记录最多的 8 个城市逐月均温"],
+  ["eda-conditions", "天气状况分布", "天气文本条件的频数统计"],
+  ["eda-air", "空气质量分析", "PM2.5 与 PM10 关系及 EPA 等级分布"],
+  ["eda-corr", "特征相关性", "天气变量皮尔逊相关系数矩阵"],
+  ["eda-geo", "全球空间分布", "最新观测的城市温度快照"],
+  ["eda-comfort", "环境指标关系", "湿度区间下的能见度与降水"],
+  ["eda-quality", "领域质量检查", "异常值边界规则检查结果"],
 ];
+
+// ---- ECharts 基础设施：实例登记、销毁、世界地图懒加载 ----
+const chartPalette = ["#1b8278", "#dd765b", "#d5a842", "#4c80ba", "#116057", "#8db6ad", "#c98a6b", "#6f9d92"];
+const charts = [];
+let worldMapReady = null;
+
+function ensureWorldMap() {
+  if (!worldMapReady) {
+    worldMapReady = fetch("/vendor/world.json")
+      .then((response) => response.json())
+      .then((json) => echarts.registerMap("world", json));
+    worldMapReady.catch(() => { worldMapReady = null; });
+  }
+  return worldMapReady;
+}
+
+function disposeCharts() {
+  while (charts.length) charts.pop().dispose();
+}
+
+function mountChart(id, option) {
+  const el = document.getElementById(id);
+  if (!el || typeof echarts === "undefined") return;
+  const chart = echarts.init(el);
+  chart.setOption(option);
+  charts.push(chart);
+}
+
+window.addEventListener("resize", () => charts.forEach((chart) => chart.resize()));
+
+function tempColor(value) {
+  return value < 5 ? "#4c80ba" : value > 28 ? "#dd765b" : "#d5a842";
+}
+
+function geoScatterOption(items, symbolSize) {
+  return {
+    tooltip: {
+      trigger: "item",
+      textStyle: { fontSize: 11 },
+      formatter: (params) => `${displayCity(params.data[3])} · ${displayCountry(params.data[4])}<br/>温度 ${fmt(params.data[2])} °C · PM2.5 ${fmt(params.data[5])}`,
+    },
+    visualMap: {
+      min: -10, max: 38, left: 6, bottom: 4, text: ["热", "冷"], calculable: false,
+      inRange: { color: ["#4c80ba", "#d5a842", "#dd765b"] }, textStyle: { fontSize: 10 },
+    },
+    geo: {
+      map: "world", roam: true, scaleLimit: { min: 0.7, max: 10 },
+      itemStyle: { areaColor: "#eef4f1", borderColor: "#c9dcd3" },
+      emphasis: { label: { show: false } },
+    },
+    series: [{
+      type: "scatter", coordinateSystem: "geo", symbolSize,
+      data: items.map((item) => [Number(item.longitude), Number(item.latitude), Number(item.temperature), item.city, item.country, item.pm25]),
+    }],
+  };
+}
 
 function esc(value) {
   return String(value ?? "")
@@ -256,6 +312,7 @@ async function handleLogin(event) {
 }
 
 function renderApp() {
+  disposeCharts();
   const route = routes[state.route] || routes["/dashboard"];
   app.innerHTML = `
     <div class="app-shell">
@@ -306,36 +363,59 @@ function renderDashboard() {
   const s = state.summary || {};
   document.getElementById("page-root").innerHTML = `${pageHeader("OVERVIEW / DASHBOARD", "全球天气数据总览", "从全球城市最新天气快照出发，查看数据规模、趋势、环境状态与出行推荐。", '<button class="secondary-button" id="refresh-dashboard">↻ 刷新数据</button>')}
     <div class="metric-grid">${metricCard("数据记录", fmt(s.records, 0), `${fmt(s.fields, 0)} 个原始字段`)}${metricCard("城市国家", fmt(s.city_country_pairs, 0), `${fmt(s.countries, 0)} 个国家或地区`)}${metricCard("平均温度", `${fmt(s.temperature_mean)} °C`, `中位数 ${fmt(s.temperature_median)} °C`, "warm")}${metricCard("PM2.5 中位数", `${fmt(s.air_quality_pm25_median)} μg/m³`, "空气质量指标", "clean")}</div>
-    <div class="dashboard-grid"><section class="content-card trend-card"><div class="card-heading"><div><p class="kicker">TIME SERIES</p><h2>全球平均温度趋势</h2></div><span class="muted">最近 180 天</span></div>${trendSvg(state.trend)}</section><section class="content-card condition-card"><div class="card-heading"><div><p class="kicker">CONDITIONS</p><h2>天气状况分布</h2></div></div>${conditionList(state.conditions)}</section></div>
-    <div class="dashboard-grid second-row"><section class="content-card map-card"><div class="card-heading"><div><p class="kicker">LATEST SNAPSHOT</p><h2>全球城市观测分布</h2></div><span class="muted">${fmt(state.map.length, 0)} 个城市</span></div>${mapSvg(state.map)}</section><section class="content-card"><div class="card-heading"><div><p class="kicker">TRAVEL PICKS</p><h2>舒适度推荐 Top 5</h2></div><a class="text-link" href="#/recommend">查看全部 →</a></div>${recommendCompact(state.recommend)}</section></div>
+    <div class="dashboard-grid"><section class="content-card trend-card"><div class="card-heading"><div><p class="kicker">TIME SERIES</p><h2>全球平均温度趋势</h2></div><span class="muted">最近 180 天 · 悬停查看</span></div><div id="dash-trend" class="echart-box"></div></section><section class="content-card condition-card"><div class="card-heading"><div><p class="kicker">CONDITIONS</p><h2>天气状况分布</h2></div></div><div id="dash-conditions" class="echart-box"></div></section></div>
+    <div class="dashboard-grid second-row"><section class="content-card map-card"><div class="card-heading"><div><p class="kicker">LATEST SNAPSHOT</p><h2>全球城市观测分布</h2></div><span class="muted">${fmt(state.map.length, 0)} 个城市 · 滚轮缩放</span></div><div id="dash-map" class="echart-box"></div></section><section class="content-card"><div class="card-heading"><div><p class="kicker">TRAVEL PICKS</p><h2>舒适度推荐 Top 5</h2></div><a class="text-link" href="#/recommend">查看全部 →</a></div>${recommendCompact(state.recommend)}</section></div>
     <section class="notice-panel"><div><p class="kicker">DATA COVERAGE</p><strong>${dateText(s.time_start)} 至 ${dateText(s.time_end)}</strong><span>统一以 UTC 时间轴整理的全球城市天气观测数据</span></div><div class="notice-stat"><span>重复行</span><strong>${fmt(s.duplicate_rows, 0)}</strong></div><div class="notice-stat"><span>异常规则</span><strong class="${Object.values(s.quality_rules || {}).some((v) => v > 0) ? "warning-text" : "ok-text"}">${Object.values(s.quality_rules || {}).filter((v) => v > 0).length} 项需复核</strong></div></section>`;
   document.getElementById("refresh-dashboard").addEventListener("click", loadDashboard);
+  mountDashboardCharts();
 }
 
-function trendSvg(items) {
-  if (!items.length) return '<div class="empty-state">暂无趋势数据</div>';
-  const width = 760, height = 260, pad = { l: 44, r: 18, t: 18, b: 34 };
-  const values = items.map((item) => Number(item.temperature_mean));
-  const low = Math.floor(Math.min(...values) - 2), high = Math.ceil(Math.max(...values) + 2);
-  const x = (i) => pad.l + i * (width - pad.l - pad.r) / Math.max(items.length - 1, 1);
-  const y = (v) => pad.t + (high - v) * (height - pad.t - pad.b) / (high - low);
-  const points = values.map((value, i) => `${x(i).toFixed(1)},${y(value).toFixed(1)}`).join(" ");
-  const area = `${pad.l},${height - pad.b} ${points} ${x(values.length - 1)},${height - pad.b}`;
-  const labels = [0, Math.floor(items.length / 2), items.length - 1].map((i) => `<text x="${x(i)}" y="${height - 8}" class="axis-label">${esc(String(items[i].date).slice(0, 10))}</text>`).join("");
-  const lines = [0, 1, 2, 3].map((i) => { const value = low + (high - low) * i / 3; return `<line x1="${pad.l}" x2="${width - pad.r}" y1="${y(value)}" y2="${y(value)}" class="grid-line"/><text x="${pad.l - 8}" y="${y(value) + 4}" text-anchor="end" class="axis-label">${value}°</text>`; }).join("");
-  return `<div class="chart-wrap"><svg class="line-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="全球平均温度趋势">${lines}<polygon points="${area}" class="trend-area"/><polyline points="${points}" class="trend-path"/>${labels}</svg><div class="chart-key"><span><i class="key-line"></i>平均温度</span><span><i class="key-area"></i>波动区间</span></div></div>`;
-}
-
-function conditionList(items) {
-  if (!items.length) return '<div class="empty-state">暂无状况数据</div>';
-  const max = Math.max(...items.map((item) => item.records));
-  return `<div class="condition-list">${items.slice(0, 8).map((item, index) => `<div class="condition-row"><div><span class="rank">0${index + 1}</span><strong title="${esc(displayCondition(item.condition))}">${esc(displayCondition(item.condition))}</strong></div><div class="bar-track"><i style="width:${Math.max(3, item.records / max * 100)}%"></i></div><span class="condition-count">${fmt(item.share)}%</span></div>`).join("")}</div>`;
-}
-
-function mapSvg(items) {
-  if (!items.length) return '<div class="empty-state">暂无坐标数据</div>';
-  const points = items.filter((item) => Number.isFinite(Number(item.latitude)) && Number.isFinite(Number(item.longitude))).map((item) => { const cx = 18 + (Number(item.longitude) + 180) / 360 * 604; const cy = 24 + (90 - Number(item.latitude)) / 180 * 214; const temp = Number(item.temperature); const color = temp < 5 ? "#4d81be" : temp > 28 ? "#dc775d" : "#d4a94e"; return `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="2.5" fill="${color}" opacity=".72"><title>${esc(displayCity(item.city))} / ${esc(displayCountry(item.country))} · ${fmt(item.temperature)}°C</title></circle>`; }).join("");
-  return `<div class="map-wrap"><svg viewBox="0 0 640 260" class="map-chart" role="img" aria-label="全球城市观测分布"><rect x="18" y="24" width="604" height="214" rx="3" class="map-bg"/><path d="M70 85l35-28 47 4 23 25 42 12 25 36-15 35-44-8-31 28-28-31-42-8-14-32zm196-22 28-20 39 8 10 31-22 22 9 34-42-3-20-34zm126 12 43-12 42 20-5 25-28 13-36-19zm122 24 34-9 32 28-18 31-40-8-20-22z" class="map-land"/>${points}</svg><div class="map-key"><span><i class="temp-dot cool"></i>低温</span><span><i class="temp-dot mild"></i>舒适</span><span><i class="temp-dot hot"></i>高温</span></div></div>`;
+function mountDashboardCharts() {
+  const items = state.trend;
+  if (items.length) {
+    const dates = items.map((item) => item.date);
+    const mean = items.map((item) => Number(item.temperature_mean));
+    const p10 = items.map((item) => Number(item.temperature_p10));
+    const p90 = items.map((item) => Number(item.temperature_p90));
+    mountChart("dash-trend", {
+      tooltip: { trigger: "axis", textStyle: { fontSize: 11 }, valueFormatter: (value) => `${fmt(value)} °C` },
+      legend: { data: ["平均温度", "波动区间"], top: 0, textStyle: { fontSize: 10 } },
+      grid: { left: 40, right: 12, top: 26, bottom: 42 },
+      xAxis: { type: "category", data: dates, boundaryGap: false, axisLabel: { fontSize: 10 } },
+      yAxis: { type: "value", scale: true, axisLabel: { fontSize: 10, formatter: "{value}°" }, splitLine: { lineStyle: { color: "#e7efec" } } },
+      dataZoom: [{ type: "inside" }, { type: "slider", height: 14, bottom: 4, textStyle: { fontSize: 9 } }],
+      series: [
+        { name: "p10", type: "line", data: p10, stack: "band", lineStyle: { opacity: 0 }, symbol: "none", silent: true },
+        { name: "p90", type: "line", data: p90.map((value, index) => value - p10[index]), stack: "band", lineStyle: { opacity: 0 }, symbol: "none", silent: true, areaStyle: { color: "rgba(27,130,120,.14)" } },
+        { name: "平均温度", type: "line", data: mean, smooth: true, showSymbol: false, z: 3, lineStyle: { width: 2.5, color: "#1b8278" }, itemStyle: { color: "#1b8278" } },
+      ],
+    });
+  } else {
+    document.getElementById("dash-trend").innerHTML = '<div class="empty-state">暂无趋势数据</div>';
+  }
+  const conditions = state.conditions.slice(0, 8);
+  if (conditions.length) {
+    const max = Math.max(...conditions.map((item) => item.records));
+    mountChart("dash-conditions", {
+      tooltip: { trigger: "item", textStyle: { fontSize: 11 }, formatter: (params) => `${displayCondition(params.name)}<br/>${fmt(params.value, 0)} 条 · ${fmt(params.data.share)}%` },
+      grid: { left: 6, right: 44, top: 8, bottom: 8, containLabel: true },
+      xAxis: { type: "value", show: false },
+      yAxis: { type: "category", inverse: true, data: conditions.map((item) => item.condition), axisLabel: { fontSize: 10, color: "#51635f", formatter: (value) => displayCondition(value) }, axisLine: { show: false }, axisTick: { show: false } },
+      series: [{
+        type: "bar", barWidth: 12, data: conditions.map((item) => ({ value: item.records, share: item.share, itemStyle: { color: "#1b8278", borderRadius: [0, 6, 6, 0], opacity: 0.45 + 0.55 * item.records / max } })),
+        label: { show: true, position: "right", fontSize: 10, color: "#51635f", formatter: (params) => `${fmt(params.data.share)}%` },
+      }],
+    });
+  } else {
+    document.getElementById("dash-conditions").innerHTML = '<div class="empty-state">暂无状况数据</div>';
+  }
+  if (state.map.length) {
+    ensureWorldMap().then(() => mountChart("dash-map", geoScatterOption(state.map, 7))).catch(() => {
+      document.getElementById("dash-map").innerHTML = '<div class="empty-state">世界地图资源加载失败</div>';
+    });
+  } else {
+    document.getElementById("dash-map").innerHTML = '<div class="empty-state">暂无坐标数据</div>';
+  }
 }
 
 function recommendCompact(items) {
@@ -387,8 +467,146 @@ function translateRecommendData() {
   });
 }
 
-function renderEda() {
-  document.getElementById("page-root").innerHTML = `${pageHeader("EXPLORATORY DATA ANALYSIS", "EDA 分析图谱", "九张分析图从时间、空间、天气、空气质量和数据质量多个维度审视数据集。", '<span class="data-badge">9 张分析图</span>')}<section class="eda-grid">${edaFigures.map(([file, title, desc]) => `<figure class="eda-card"><a href="/figures/${file}" target="_blank"><img src="/figures/${file}" alt="${esc(title)}" loading="lazy" /></a><figcaption><strong>${esc(title)}</strong><span>${esc(desc)}</span><a href="/figures/${file}" target="_blank">放大查看 ↗</a></figcaption></figure>`).join("")}</section>`;
+function renderEda(data) {
+  document.getElementById("page-root").innerHTML = `${pageHeader("EXPLORATORY DATA ANALYSIS", "EDA 分析图谱", "九组交互图表从时间、空间、天气、空气质量和数据质量多个维度审视数据集。", '<span class="data-badge">ECharts 交互图表</span>')}<section class="eda-grid">${edaCharts.map(([id, title, desc]) => `<figure class="eda-card"><div class="eda-chart" id="${id}"></div><figcaption><strong>${esc(title)}</strong><span>${esc(desc)}</span></figcaption></figure>`).join("")}</section>`;
+  mountEdaCharts(data);
+}
+
+function mountEdaCharts(data) {
+  const axisStyle = { axisLabel: { fontSize: 10 }, axisLine: { lineStyle: { color: "#d7e2dd" } } };
+
+  if (data.temporal?.length) {
+    mountChart("eda-temporal", {
+      tooltip: { trigger: "axis", textStyle: { fontSize: 11 } },
+      legend: { data: ["记录数", "活跃城市"], top: 0, textStyle: { fontSize: 10 } },
+      grid: { left: 44, right: 14, top: 30, bottom: 42 },
+      xAxis: { type: "category", data: data.temporal.map((item) => item.date), boundaryGap: false, ...axisStyle },
+      yAxis: { type: "value", ...axisStyle, splitLine: { lineStyle: { color: "#e7efec" } } },
+      dataZoom: [{ type: "inside" }, { type: "slider", height: 14, bottom: 4, textStyle: { fontSize: 9 } }],
+      series: [
+        { name: "记录数", type: "line", data: data.temporal.map((item) => item.records), showSymbol: false, smooth: true, lineStyle: { width: 2, color: "#1b8278" }, itemStyle: { color: "#1b8278" } },
+        { name: "活跃城市", type: "line", data: data.temporal.map((item) => item.locations), showSymbol: false, smooth: true, lineStyle: { width: 2, color: "#dd765b" }, itemStyle: { color: "#dd765b" } },
+      ],
+    });
+  } else { document.getElementById("eda-temporal").innerHTML = '<div class="empty-state">暂无数据</div>'; }
+
+  if (data.temperature_trend?.length) {
+    const trend = data.temperature_trend;
+    const p10 = trend.map((item) => item.p10);
+    mountChart("eda-trend", {
+      tooltip: { trigger: "axis", textStyle: { fontSize: 11 }, valueFormatter: (value) => `${fmt(value)} °C` },
+      legend: { data: ["温度均值", "10-90 分位区间"], top: 0, textStyle: { fontSize: 10 } },
+      grid: { left: 40, right: 14, top: 30, bottom: 42 },
+      xAxis: { type: "category", data: trend.map((item) => item.date), boundaryGap: false, ...axisStyle },
+      yAxis: { type: "value", scale: true, ...axisStyle, splitLine: { lineStyle: { color: "#e7efec" } } },
+      dataZoom: [{ type: "inside" }, { type: "slider", height: 14, bottom: 4, textStyle: { fontSize: 9 } }],
+      series: [
+        { name: "p10", type: "line", data: p10, stack: "band", lineStyle: { opacity: 0 }, symbol: "none", silent: true },
+        { name: "band", type: "line", data: trend.map((item) => item.p90 - item.p10), stack: "band", lineStyle: { opacity: 0 }, symbol: "none", silent: true, areaStyle: { color: "rgba(75,128,186,.18)" } },
+        { name: "温度均值", type: "line", data: trend.map((item) => item.mean), smooth: true, showSymbol: false, z: 3, lineStyle: { width: 2, color: "#4c80ba" }, itemStyle: { color: "#4c80ba" } },
+      ],
+    });
+  } else { document.getElementById("eda-trend").innerHTML = '<div class="empty-state">暂无数据</div>'; }
+
+  if (data.seasonal_profiles?.length) {
+    mountChart("eda-seasonal", {
+      tooltip: { trigger: "axis", textStyle: { fontSize: 11 }, valueFormatter: (value) => `${fmt(value)} °C` },
+      legend: { top: 0, textStyle: { fontSize: 9 }, type: "scroll", pageIconSize: 8 },
+      grid: { left: 34, right: 12, top: 34, bottom: 24 },
+      xAxis: { type: "category", data: ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"], ...axisStyle },
+      yAxis: { type: "value", ...axisStyle, splitLine: { lineStyle: { color: "#e7efec" } } },
+      series: data.seasonal_profiles.map((profile, index) => ({
+        name: displayCity(profile.city),
+        type: "line", smooth: true, showSymbol: false,
+        data: profile.months,
+        lineStyle: { width: 1.8, color: chartPalette[index % chartPalette.length] },
+        itemStyle: { color: chartPalette[index % chartPalette.length] },
+      })),
+    });
+  } else { document.getElementById("eda-seasonal").innerHTML = '<div class="empty-state">暂无数据</div>'; }
+
+  if (data.conditions?.length) {
+    const conditions = [...data.conditions].reverse();
+    mountChart("eda-conditions", {
+      tooltip: { trigger: "item", textStyle: { fontSize: 11 }, formatter: (params) => `${displayCondition(params.name)}<br/>${fmt(params.value, 0)} 条 · ${fmt(params.data.share)}%` },
+      grid: { left: 6, right: 46, top: 8, bottom: 8, containLabel: true },
+      xAxis: { type: "value", show: false },
+      yAxis: { type: "category", inverse: false, data: conditions.map((item) => item.condition), axisLabel: { fontSize: 10, color: "#51635f", formatter: (value) => displayCondition(value) }, axisLine: { show: false }, axisTick: { show: false } },
+      series: [{
+        type: "bar", barWidth: 11,
+        data: conditions.map((item) => ({ value: item.records, share: item.share, itemStyle: { color: "#1b8278", borderRadius: [0, 6, 6, 0] } })),
+        label: { show: true, position: "right", fontSize: 10, color: "#51635f", formatter: (params) => `${fmt(params.data.share)}%` },
+      }],
+    });
+  } else { document.getElementById("eda-conditions").innerHTML = '<div class="empty-state">暂无数据</div>'; }
+
+  if (data.air_quality?.scatter?.length) {
+    mountChart("eda-air", {
+      tooltip: {
+        trigger: "item", textStyle: { fontSize: 11 },
+        formatter: (params) => params.data.name ? params.data.name : `PM2.5 ${params.data.value[0]} · PM10 ${params.data.value[1]}`,
+      },
+      grid: { left: 6, right: 14, top: 22, bottom: 6, containLabel: true },
+      xAxis: { type: "value", name: "PM2.5", nameTextStyle: { fontSize: 10 }, ...axisStyle, splitLine: { lineStyle: { color: "#e7efec" } } },
+      yAxis: { type: "value", name: "PM10", nameTextStyle: { fontSize: 10 }, ...axisStyle, splitLine: { lineStyle: { color: "#e7efec" } } },
+      series: [
+        { type: "scatter", symbolSize: 9, itemStyle: { color: "rgba(27,130,120,.45)" }, data: data.air_quality.scatter.map((item) => [item.pm25, item.pm10]) },
+      ],
+    });
+  } else { document.getElementById("eda-air").innerHTML = '<div class="empty-state">暂无数据</div>'; }
+
+  if (data.correlation?.fields?.length) {
+    const fields = data.correlation.fields;
+    const matrix = data.correlation.matrix;
+    const cells = [];
+    matrix.forEach((row, i) => row.forEach((value, j) => cells.push([j, i, value])));
+    mountChart("eda-corr", {
+      tooltip: { position: "top", textStyle: { fontSize: 11 }, formatter: (params) => `${fields[params.data.value[1]]} × ${fields[params.data.value[0]]}<br/>相关系数 ${params.data.value[2]}` },
+      grid: { left: 6, right: 8, top: 8, bottom: 6, containLabel: true },
+      xAxis: { type: "category", data: fields, splitArea: { show: true }, axisLabel: { fontSize: 9, rotate: 40 }, axisLine: { show: false } },
+      yAxis: { type: "category", data: fields, splitArea: { show: true }, axisLabel: { fontSize: 9 }, axisLine: { show: false } },
+      visualMap: { min: -1, max: 1, calculable: false, orient: "horizontal", left: "center", bottom: -4, itemHeight: 60, textStyle: { fontSize: 9 }, inRange: { color: ["#4c80ba", "#ffffff", "#dd765b"] } },
+      series: [{ type: "heatmap", data: cells, label: { show: true, fontSize: 7, formatter: (params) => params.value[2] } }],
+    });
+  } else { document.getElementById("eda-corr").innerHTML = '<div class="empty-state">暂无数据</div>'; }
+
+  if (data.geospatial?.length) {
+    ensureWorldMap().then(() => mountChart("eda-geo", geoScatterOption(data.geospatial, 6))).catch(() => {
+      document.getElementById("eda-geo").innerHTML = '<div class="empty-state">世界地图资源加载失败</div>';
+    });
+  } else { document.getElementById("eda-geo").innerHTML = '<div class="empty-state">暂无数据</div>'; }
+
+  if (data.comfort?.length) {
+    mountChart("eda-comfort", {
+      tooltip: { trigger: "axis", textStyle: { fontSize: 11 } },
+      legend: { data: ["平均能见度", "平均降水"], top: 0, textStyle: { fontSize: 10 } },
+      grid: { left: 40, right: 40, top: 30, bottom: 24 },
+      xAxis: { type: "category", data: data.comfort.map((item) => item.bin), ...axisStyle },
+      yAxis: [
+        { type: "value", name: "km", nameTextStyle: { fontSize: 9 }, ...axisStyle, splitLine: { lineStyle: { color: "#e7efec" } } },
+        { type: "value", name: "mm", nameTextStyle: { fontSize: 9 }, ...axisStyle, splitLine: { show: false } },
+      ],
+      series: [
+        { name: "平均能见度", type: "line", smooth: true, data: data.comfort.map((item) => item.visibility), lineStyle: { width: 2, color: "#4c80ba" }, itemStyle: { color: "#4c80ba" } },
+        { name: "平均降水", type: "bar", yAxisIndex: 1, barWidth: 12, data: data.comfort.map((item) => item.precipitation), itemStyle: { color: "rgba(213,168,66,.7)", borderRadius: [3, 3, 0, 0] } },
+      ],
+    });
+  } else { document.getElementById("eda-comfort").innerHTML = '<div class="empty-state">暂无数据</div>'; }
+
+  const checks = Object.entries(data.domain_checks || {});
+  if (checks.length) {
+    mountChart("eda-quality", {
+      tooltip: { trigger: "item", textStyle: { fontSize: 11 }, formatter: (params) => `${params.name}<br/>异常记录 ${fmt(params.value, 0)} 条` },
+      grid: { left: 6, right: 40, top: 8, bottom: 8, containLabel: true },
+      xAxis: { type: "value", show: false },
+      yAxis: { type: "category", inverse: true, data: checks.map(([label]) => label), axisLabel: { fontSize: 10, color: "#51635f" }, axisLine: { show: false }, axisTick: { show: false } },
+      series: [{
+        type: "bar", barWidth: 12,
+        data: checks.map(([, value]) => ({ value, itemStyle: { color: value > 0 ? "#dd765b" : "#1b8278", borderRadius: [0, 6, 6, 0] } })),
+        label: { show: true, position: "right", fontSize: 10, color: "#51635f" },
+      }],
+    });
+  } else { document.getElementById("eda-quality").innerHTML = '<div class="empty-state">暂无数据</div>'; }
 }
 
 function renderQuality() {
@@ -424,7 +642,13 @@ async function renderPage() {
   if (state.route === "/dashboard") return loadDashboard();
   if (state.route === "/city-data") { try { await loadCities(); } catch (error) { renderError(error.message); } return; }
   if (state.route === "/recommend") return loadRecommend();
-  if (state.route === "/eda") return renderEda();
+  if (state.route === "/eda") {
+    try {
+      const data = await api("/api/eda");
+      renderEda(data);
+    } catch (error) { renderError(error.message); }
+    return;
+  }
   if (state.route === "/quality") {
     try {
       const [summary, cleaning] = await Promise.all([
