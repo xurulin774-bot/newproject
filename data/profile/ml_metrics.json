@@ -38,7 +38,7 @@
       "recall": 0.187,
       "f1": 0.2778,
       "auc": 0.8419,
-      "train_seconds": 0.05
+      "train_seconds": 0.09
     },
     {
       "key": "decision_tree",
@@ -48,7 +48,7 @@
       "recall": 0.4211,
       "f1": 0.4918,
       "auc": 0.8503,
-      "train_seconds": 0.12
+      "train_seconds": 0.2
     },
     {
       "key": "random_forest",
@@ -58,7 +58,7 @@
       "recall": 0.3994,
       "f1": 0.5163,
       "auc": 0.8972,
-      "train_seconds": 0.93
+      "train_seconds": 1.99
     },
     {
       "key": "knn",
@@ -68,7 +68,7 @@
       "recall": 0.2789,
       "f1": 0.3866,
       "auc": 0.8489,
-      "train_seconds": 0.01
+      "train_seconds": 0.02
     },
     {
       "key": "naive_bayes",
@@ -78,7 +78,7 @@
       "recall": 0.8478,
       "f1": 0.4478,
       "auc": 0.8028,
-      "train_seconds": 0.01
+      "train_seconds": 0.02
     },
     {
       "key": "svm",
@@ -88,7 +88,7 @@
       "recall": 0.2876,
       "f1": 0.407,
       "auc": 0.837,
-      "train_seconds": 5.54
+      "train_seconds": 10.38
     },
     {
       "key": "gradient_boosting",
@@ -98,7 +98,7 @@
       "recall": 0.3547,
       "f1": 0.4743,
       "auc": 0.8872,
-      "train_seconds": 9.59
+      "train_seconds": 15.38
     },
     {
       "key": "lightgbm",
@@ -108,7 +108,7 @@
       "recall": 0.4801,
       "f1": 0.5724,
       "auc": 0.9062,
-      "train_seconds": 0.92
+      "train_seconds": 2.93
     }
   ],
   "best_model": "LightGBM",

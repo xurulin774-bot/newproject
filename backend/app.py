@@ -1195,7 +1195,7 @@ class WeatherRequestHandler(SimpleHTTPRequestHandler):
                     self.send_json({"error": f"未知城市：{key}"}, status=404)
                 return
             if parsed.path == "/api/clusters":
-                self.send_json(self.store.clusters(self._query_int(query, "k", 5)))
+                self.send_json(self.server.store.clusters(self._query_int(query, "k", 5)))
                 return
             if parsed.path == "/api/advice":
                 key = self._query_text(query, "k")
