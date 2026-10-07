@@ -4,6 +4,7 @@ const state = {
   user: null,
   route: window.location.hash.replace("#", "") || "/dashboard",
   summary: null,
+  cleaning: null,
   trend: [],
   conditions: [],
   map: [],
@@ -392,9 +393,22 @@ function renderEda() {
 
 function renderQuality() {
   const s = state.summary || {};
+  const c = state.cleaning || {};
   const rules = Object.entries(s.quality_rules || {});
   const qualityBadge = `<span class="quality-badge">${rules.filter(([, value]) => value > 0).length ? "存在待复核项" : "检查通过"}</span>`;
-  document.getElementById("page-root").innerHTML = `${pageHeader("DATA QUALITY", "数据质量检查", "把模型训练和推荐使用前需要关注的边界规则集中展示，便于后续更换数据集时复用。", qualityBadge)}<div class="quality-grid"><section class="content-card"><div class="card-heading"><div><p class="kicker">VALIDATION RULES</p><h2>字段边界检查</h2></div></div><div class="quality-table">${rules.map(([label, value]) => `<div class="quality-check"><span class="check-icon ${value > 0 ? "issue" : "pass"}">${value > 0 ? "!" : "✓"}</span><div><strong>${esc(label)}</strong><small>${value > 0 ? "检测到异常记录，建议复核来源或清洗规则" : "未检测到越界记录"}</small></div><b class="${value > 0 ? "warning-text" : "ok-text"}">${fmt(value, 0)}</b></div>`).join("")}</div></section><section class="content-card quality-summary"><div class="card-heading"><div><p class="kicker">PROFILE SUMMARY</p><h2>数据集概况</h2></div></div><div class="profile-list"><div><span>原始文件</span><strong>${esc(s.source_file)}</strong></div><div><span>重复行</span><strong>${fmt(s.duplicate_rows, 0)}</strong></div><div><span>缺失值</span><strong class="ok-text">无缺失记录</strong></div><div><span>时间轴</span><strong>last_updated_epoch / UTC</strong></div></div><div class="quality-note"><strong>使用提示</strong><p>当前数据无缺失值、无重复行；检测到的异常边界值应在建模前复核。推荐结果为规则评分，不代表天气预报。</p></div></section></div>`;
+  const cleaningStats = [
+    ["清洗前行数", fmt(c.rows_before, 0)],
+    ["清洗后行数", fmt(c.rows_after, 0)],
+    ["剔除位置错乱行", fmt(c.mismatch_removed, 0)],
+    ["剔除垃圾行（人工复核）", fmt(c.junk_removed, 0)],
+    ["国家名拼写归并", `${fmt(c.country_rename_count, 0)} 项`],
+    ["城市拼写归并", `${fmt(c.label_merge_count, 0)} 组`],
+    ["城市数", `${fmt(c.cities_before, 0)} → ${fmt(c.cities_after, 0)}`],
+    ["国家数", `${fmt(c.countries_before, 0)} → ${fmt(c.countries_after, 0)}`],
+  ];
+  const detail = c.detail || {};
+  const cleaningCard = `<section class="content-card"><div class="card-heading"><div><p class="kicker">CLEANING REPORT</p><h2>数据清洗报告</h2></div><span class="muted">仅修正身份字段，不改动气象数值</span></div><div class="profile-list">${cleaningStats.map(([label, value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join("")}</div><div class="quality-note"><strong>剔除的位置错乱组（同名城市坐标远离主位置）</strong><p>${esc((detail.dropped_mismatch || []).join("；")) || "无"}</p><strong>人工复核确认的垃圾城市</strong><p>${esc((detail.dropped_junk_keys || []).join("；")) || "无"}</p></div></section>`;
+  document.getElementById("page-root").innerHTML = `${pageHeader("DATA QUALITY", "数据质量检查", "把模型训练和推荐使用前需要关注的边界规则集中展示，便于后续更换数据集时复用。", qualityBadge)}<div class="quality-grid"><section class="content-card"><div class="card-heading"><div><p class="kicker">VALIDATION RULES</p><h2>字段边界检查</h2></div></div><div class="quality-table">${rules.map(([label, value]) => `<div class="quality-check"><span class="check-icon ${value > 0 ? "issue" : "pass"}">${value > 0 ? "!" : "✓"}</span><div><strong>${esc(label)}</strong><small>${value > 0 ? "检测到异常记录，建议复核来源或清洗规则" : "未检测到越界记录"}</small></div><b class="${value > 0 ? "warning-text" : "ok-text"}">${fmt(value, 0)}</b></div>`).join("")}</div></section><section class="content-card quality-summary"><div class="card-heading"><div><p class="kicker">PROFILE SUMMARY</p><h2>数据集概况</h2></div></div><div class="profile-list"><div><span>原始文件</span><strong>${esc(s.source_file)}</strong></div><div><span>重复行</span><strong>${fmt(s.duplicate_rows, 0)}</strong></div><div><span>缺失值</span><strong class="ok-text">无缺失记录</strong></div><div><span>时间轴</span><strong>last_updated_epoch / UTC</strong></div></div><div class="quality-note"><strong>使用提示</strong><p>当前数据无缺失值、无重复行；检测到的异常边界值应在建模前复核。推荐结果为规则评分，不代表天气预报。</p></div></section></div>${cleaningCard}`;
 }
 
 function renderSystem() {
@@ -411,7 +425,17 @@ async function renderPage() {
   if (state.route === "/city-data") { try { await loadCities(); } catch (error) { renderError(error.message); } return; }
   if (state.route === "/recommend") return loadRecommend();
   if (state.route === "/eda") return renderEda();
-  if (state.route === "/quality") { if (!state.summary) { try { state.summary = await api("/api/summary"); } catch (error) { return renderError(error.message); } } return renderQuality(); }
+  if (state.route === "/quality") {
+    try {
+      const [summary, cleaning] = await Promise.all([
+        state.summary ? Promise.resolve(state.summary) : api("/api/summary"),
+        api("/api/cleaning"),
+      ]);
+      state.summary = summary;
+      state.cleaning = cleaning.report;
+    } catch (error) { return renderError(error.message); }
+    return renderQuality();
+  }
   return renderSystem();
 }
 

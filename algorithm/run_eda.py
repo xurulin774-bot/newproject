@@ -9,13 +9,14 @@ import textwrap
 from pathlib import Path
 
 import matplotlib
-
 matplotlib.use("Agg")
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+
+from data_cleaning import clean_weather_frame
 
 
 REQUIRED_COLUMNS = {
@@ -133,6 +134,9 @@ def load_dataset(csv_path: Path) -> pd.DataFrame:
     missing = sorted(REQUIRED_COLUMNS.difference(frame.columns))
     if missing:
         raise ValueError(f"The CSV is missing required columns: {', '.join(missing)}")
+
+    frame, cleaning_report = clean_weather_frame(frame)
+    frame.attrs["cleaning_report"] = cleaning_report
 
     frame["observed_at_utc"] = pd.to_datetime(
         frame["last_updated_epoch"], unit="s", utc=True, errors="coerce"
@@ -403,12 +407,24 @@ def rounded(value: float) -> float:
 def create_profile(frame: pd.DataFrame, source_path: Path) -> dict[str, object]:
     latest = frame.loc[frame["observed_at_utc"].idxmax(), "observed_at_utc"]
     earliest = frame.loc[frame["observed_at_utc"].idxmin(), "observed_at_utc"]
+    cleaning = frame.attrs.get("cleaning_report", {})
     profile = {
         "source_file": str(source_path),
         "rows": int(len(frame)),
         "columns": int(len(frame.columns) - 6),
         "countries": int(frame["country"].nunique()),
         "locations": int(frame["location_name"].nunique()),
+        "cleaning": {
+            "rows_before": cleaning.get("rows_before"),
+            "rows_after": cleaning.get("rows_after"),
+            "rows_removed": cleaning.get("rows_removed"),
+            "junk_removed": cleaning.get("junk_removed"),
+            "mismatch_removed": cleaning.get("mismatch_removed"),
+            "country_rename_count": len(cleaning.get("country_renames", {})),
+            "label_merge_count": len(cleaning.get("label_merges", {})),
+            "dropped_mismatch": cleaning.get("dropped_mismatch", []),
+            "dropped_junk_keys": cleaning.get("dropped_junk_keys", []),
+        },
         "time_coverage_utc": {"start": earliest.isoformat(), "end": latest.isoformat()},
         "missing_values": {column: int(value) for column, value in frame.isna().sum().items() if value},
         "duplicate_rows": int(frame.drop(columns=["observed_at_utc", "observed_at_local", "utc_date", "local_month", "local_month_number", "condition_normalized"]).duplicated().sum()),
@@ -460,6 +476,18 @@ def create_report(profile: dict[str, object], output_path: Path) -> None:
     domain_check_rows = "\n".join(
         f"| {name} | {count:,} |" for name, count in domain_checks.items()
     )
+    cleaning = profile["cleaning"]
+    cleaning_rows = "\n".join(
+        f"| {name} | {count} |"
+        for name, count in [
+            ("Country alias renames", cleaning["country_rename_count"]),
+            ("Junk city rows removed", cleaning["junk_removed"]),
+            ("Mismatched location rows removed", cleaning["mismatch_removed"]),
+            ("City label merges", cleaning["label_merge_count"]),
+            ("Rows before / after cleaning", f"{cleaning['rows_before']:,} / {cleaning['rows_after']:,}"),
+        ]
+    )
+    mismatch_list = ", ".join(cleaning["dropped_mismatch"]) or "none"
     figures = "\n".join(f"| `figures/{name}` | {purpose} |" for name, purpose in figure_rows)
     report = f"""# Global weather dataset EDA report
 
@@ -512,6 +540,19 @@ These are screening rules rather than automatic deletion rules. Review flagged r
 | Rule | Flagged records |
 | --- | ---: |
 {domain_check_rows}
+
+## Cleaning summary
+
+Before analysis, the shared module `data_cleaning.py` normalizes country-name aliases, removes
+reviewed junk rows (city/country combinations that cannot be real), drops minority rows whose
+coordinates sit far from the city's dominant location, and merges near-duplicate city spellings
+within a country (distance <= 20 km). Weather values themselves are never modified.
+
+| Item | Count |
+| --- | ---: |
+{cleaning_rows}
+
+Mismatched groups removed: {mismatch_list}
 
 ## Reconstruction guidance
 

@@ -1,9 +1,39 @@
 {
-  "source_file": "C:\\Users\\徐如林\\Downloads\\archive (2)\\GlobalWeatherRepository.csv",
-  "rows": 166254,
+  "source_file": "data\\raw\\GlobalWeatherRepository.csv",
+  "rows": 165952,
   "columns": 41,
-  "countries": 211,
-  "locations": 268,
+  "countries": 191,
+  "locations": 239,
+  "cleaning": {
+    "rows_before": 166254,
+    "rows_after": 165952,
+    "rows_removed": 302,
+    "junk_removed": 10,
+    "mismatch_removed": 291,
+    "country_rename_count": 20,
+    "label_merge_count": 19,
+    "dropped_mismatch": [
+      "Beirut（Poland 1 行，距主位置 2405 km）",
+      "Bern（Belgium 1 行，距主位置 506 km）",
+      "Bogot（Hungary 138 行，距主位置 754 km）",
+      "Lom（Norway 30 行，距主位置 2221 km）",
+      "Lom（Russia 12 行，距主位置 2223 km）",
+      "Mbabane（Senegal 107 行，距主位置 6762 km）",
+      "Moroni（United States of America 2 行，距主位置 16052 km）"
+    ],
+    "dropped_junk_keys": [
+      "Colombia | Costa Rica",
+      "Guatemala | New Guatemala",
+      "Malaysia | Ivory Ivory Ban",
+      "Mexico | Mexico (Grupo Mexico)",
+      "Morocco | Morocco City",
+      "Philippines | Kiyabo",
+      "Poland | Moldova",
+      "Turkey | -Kingdom",
+      "Turkmenistan | Krasnyy Turkmenistan",
+      "United States of America | Palau"
+    ]
+  },
   "time_coverage_utc": {
     "start": "2024-05-16T08:45:00+00:00",
     "end": "2026-09-19T05:45:00+00:00"
@@ -11,61 +41,61 @@
   "missing_values": {},
   "duplicate_rows": 0,
   "top_conditions": {
-    "Partly Cloudy": 54206,
-    "Sunny": 49061,
-    "Patchy Rain Nearby": 15358,
-    "Overcast": 9315,
-    "Clear": 9260,
-    "Mist": 6639,
-    "Light Rain": 4768,
-    "Light Rain Shower": 4430,
-    "Cloudy": 2346,
-    "Fog": 2160,
+    "Partly Cloudy": 54146,
+    "Sunny": 48980,
+    "Patchy Rain Nearby": 15325,
+    "Overcast": 9291,
+    "Clear": 9219,
+    "Mist": 6633,
+    "Light Rain": 4761,
+    "Light Rain Shower": 4416,
+    "Cloudy": 2327,
+    "Fog": 2158,
     "Moderate Or Heavy Rain With Thunder": 1211,
     "Moderate Rain": 1136,
     "Patchy Light Rain With Thunder": 944,
-    "Light Drizzle": 805,
+    "Light Drizzle": 800,
     "Patchy Light Drizzle": 547
   },
   "temperature_celsius": {
-    "mean": 21.465,
+    "mean": 21.4723,
     "median": 23.7,
     "min": -29.8,
     "max": 79.3
   },
   "air_quality_pm25": {
     "median": 13.135,
-    "p95": 73.075,
+    "p95": 73.25,
     "max": 1614.1
   },
   "sampling_gaps": {
     "median_hours": 24.0,
     "p95_hours": 24.5,
-    "gaps_over_24_hours": 44645
+    "gaps_over_24_hours": 44560
   },
   "unit_consistency": {
     "temperature (F from C)": {
-      "mean_absolute_error": 0.03443838945228385,
+      "mean_absolute_error": 0.03442621962977246,
       "max_absolute_error": 0.12000000000000455
     },
     "wind (kph from mph)": {
-      "mean_absolute_error": 0.04772820279331614,
+      "mean_absolute_error": 0.04773091862707279,
       "max_absolute_error": 0.12017919999999993
     },
     "gust (kph from mph)": {
-      "mean_absolute_error": 0.04452845663141915,
+      "mean_absolute_error": 0.04452780852294615,
       "max_absolute_error": 0.12783360000000243
     },
     "pressure (in from mb)": {
-      "mean_absolute_error": 0.004817195430004543,
+      "mean_absolute_error": 0.004815640550279449,
       "max_absolute_error": 0.019639560000001666
     },
     "precipitation (in from mm)": {
-      "mean_absolute_error": 0.0006616245570031399,
+      "mean_absolute_error": 0.0006619460589929618,
       "max_absolute_error": 0.005118193999999993
     },
     "visibility (miles from km)": {
-      "mean_absolute_error": 0.2862536778820358,
+      "mean_absolute_error": 0.2863192099143125,
       "max_absolute_error": 0.9941936
     }
   },

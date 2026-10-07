@@ -8,6 +8,7 @@ import json
 import math
 import mimetypes
 import secrets
+import sys
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -16,8 +17,10 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import pandas as pd
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "algorithm"))
+
+from data_cleaning import clean_weather_frame  # noqa: E402  共享清洗模块位于 algorithm/
 DEFAULT_DATA_PATH = PROJECT_ROOT / "data" / "raw" / "GlobalWeatherRepository.csv"
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 FIGURES_DIR = PROJECT_ROOT / "figures"
@@ -84,6 +87,9 @@ class WeatherStore:
         missing = sorted(REQUIRED_COLUMNS.difference(frame.columns))
         if missing:
             raise ValueError(f"The dataset is missing required columns: {', '.join(missing)}")
+
+        frame, cleaning_report = clean_weather_frame(frame)
+        self.cleaning_report = cleaning_report
 
         frame["observed_at_utc"] = pd.to_datetime(
             frame["last_updated_epoch"], unit="s", utc=True, errors="coerce"
@@ -192,6 +198,19 @@ class WeatherStore:
                 float(self.frame["air_quality_PM2.5"].median()), 1
             ),
             "duplicate_rows": int(self.frame.duplicated().sum()),
+            "cleaning": {
+                "rows_before": self.cleaning_report["rows_before"],
+                "rows_after": self.cleaning_report["rows_after"],
+                "rows_removed": self.cleaning_report["rows_removed"],
+                "junk_removed": self.cleaning_report["junk_removed"],
+                "mismatch_removed": self.cleaning_report["mismatch_removed"],
+                "country_rename_count": len(self.cleaning_report["country_renames"]),
+                "label_merge_count": len(self.cleaning_report["label_merges"]),
+                "cities_before": self.cleaning_report["cities_before"],
+                "cities_after": self.cleaning_report["cities_after"],
+                "countries_before": self.cleaning_report["countries_before"],
+                "countries_after": self.cleaning_report["countries_after"],
+            },
             "quality_rules": quality_rules,
         }
 
@@ -484,6 +503,9 @@ class WeatherRequestHandler(SimpleHTTPRequestHandler):
                 return
             if parsed.path == "/api/summary":
                 self.send_json(self.store.summary)
+                return
+            if parsed.path == "/api/cleaning":
+                self.send_json({"report": self.store.cleaning_report})
                 return
             if parsed.path == "/api/trend":
                 self.send_json(

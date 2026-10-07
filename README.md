@@ -15,9 +15,11 @@
 ## 功能
 
 - 读取 `data/raw/GlobalWeatherRepository.csv`，展示全球城市天气数据概况。
+- 加载时执行共享数据清洗（`algorithm/data_cleaning.py`）：国家名别名标准化、剔除城市身份错乱行、同城近距拼写归并，并输出清洗报告。
 - 展示全球温度趋势、天气状况分布和城市经纬度快照。
 - 根据舒适出行、空气质量、温暖晴朗、清凉避暑四种策略推荐城市。
 - 保留 9 张 EDA 图和机器可读的数据质量报告。
+- 内置登录认证（本地演示账号 `admin / 123456`）。
 - 使用 Python 标准库 HTTP 服务，不依赖 MySQL、Redis、Java 或前端构建工具。
 
 ## 目录
@@ -25,6 +27,7 @@
 ```text
 weather-system/
 ├── algorithm/run_eda.py              # 可复用 EDA 脚本
+├── algorithm/data_cleaning.py        # 共享数据清洗模块（后端与 EDA 共用）
 ├── backend/app.py                    # 本地 API 和静态文件服务
 ├── data/raw/GlobalWeatherRepository.csv
 ├── data/profile/                     # 数据概况与 EDA 报告
@@ -69,7 +72,11 @@ EDA 脚本会校验必需字段；后端启动时也会在字段缺失时给出�
 ## API
 
 - `GET /api/health`
+- `POST /api/auth/login`（登录，本地演示账号 admin / 123456）
+- `POST /api/auth/logout`
+- `GET /api/auth/me`
 - `GET /api/summary`
+- `GET /api/cleaning`（数据清洗报告）
 - `GET /api/trend?days=180`
 - `GET /api/conditions?limit=10`
 - `GET /api/map`
@@ -78,4 +85,9 @@ EDA 脚本会校验必需字段；后端启动时也会在字段缺失时给出�
 
 ## 数据说明
 
-当前源数据共 166,254 条记录，覆盖 211 个国家、268 个城市和 41 个原始字段。项目使用 `last_updated_epoch` 作为统一 UTC 时间轴，保留本地时间和时区字段。推荐结果是面向展示和课程项目演示的规则评分，不等同于气象预报。
+源数据共 166,254 条记录（41 个原始字段），后端与 EDA 加载时经共享清洗模块
+`algorithm/data_cleaning.py` 处理为 165,952 条，覆盖 191 个国家、239 个城市
+（清洗前为 211 国、268 城：剔除约 300 行国家名错乱/身份不符的记录，归并 19 组
+同城重复拼写，如 Rangoon→Yangon、Beijing Shi→Beijing）。项目使用
+`last_updated_epoch` 作为统一 UTC 时间轴，保留本地时间和时区字段。推荐结果是
+面向展示和课程项目演示的规则评分，不等同于气象预报。
