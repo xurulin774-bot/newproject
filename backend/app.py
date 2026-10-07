@@ -9,17 +9,18 @@ import math
 import mimetypes
 import secrets
 import sys
-from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "algorithm"))
 
+from clustering import kmeans  # noqa: E402  共享聚类模块位于 algorithm/
 from data_cleaning import clean_weather_frame  # noqa: E402  共享清洗模块位于 algorithm/
 DEFAULT_DATA_PATH = PROJECT_ROOT / "data" / "raw" / "GlobalWeatherRepository.csv"
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
@@ -82,6 +83,7 @@ class WeatherStore:
     def __init__(self, data_path: Path) -> None:
         if not data_path.exists():
             raise FileNotFoundError(f"Weather dataset not found: {data_path}")
+        self.data_path = data_path
 
         frame = pd.read_csv(data_path)
         missing = sorted(REQUIRED_COLUMNS.difference(frame.columns))
@@ -118,6 +120,8 @@ class WeatherStore:
         self.conditions = self._build_conditions()
         self.summary = self._build_summary(data_path)
         self._eda: dict[str, Any] | None = None
+        self._climate: pd.DataFrame | None = None
+        self._clusters: dict[int, dict[str, Any]] = {}
 
     def _build_daily(self) -> pd.DataFrame:
         return (
@@ -374,6 +378,243 @@ class WeatherStore:
             record["reason"] = "；".join(reasons[:3]) or "综合指标较均衡"
         return records
 
+    # ------------------------------------------------------------------
+    # 城市气候画像与扩展分析模块（相似城市 / 出行规划 / 对比 / 聚类 / 预测）
+    # ------------------------------------------------------------------
+
+    MONTHLY_COLUMNS: dict[str, str] = {"temp": "temperature_celsius", "hum": "humidity", "pr": "precip_mm"}
+
+    def climate(self) -> pd.DataFrame:
+        """每城市长期气候画像：逐月均温/湿度/降水 + 年均 PM2.5，行索引为 city_key。"""
+        if self._climate is None:
+            frame = self.frame
+            base = frame.groupby("city_key").agg(
+                country=("country", "first"),
+                city=("location_name", "first"),
+                pm25=("air_quality_PM2.5", "mean"),
+            )
+            for prefix, column in self.MONTHLY_COLUMNS.items():
+                pivot = frame.pivot_table(index="city_key", columns="observed_month", values=column, aggfunc="mean")
+                pivot.columns = [f"{prefix}_{month}" for month in pivot.columns]
+                base = base.join(pivot)
+            self._climate = base
+        return self._climate
+
+    def climate_feature_columns(self) -> list[str]:
+        columns = [f"{prefix}_{month}" for prefix in self.MONTHLY_COLUMNS for month in range(1, 13)]
+        return columns + ["pm25"]
+
+    def city_profile(self, city_key: str) -> dict[str, Any]:
+        """单个城市的完整画像：最新观测 + 逐月气候序列，供对比/详情使用。"""
+        climate = self.climate()
+        if city_key not in climate.index:
+            raise KeyError(city_key)
+        row = self.latest[self.latest["city_key"] == city_key]
+        if row.empty:
+            raise KeyError(city_key)
+        record = self._latest_records(row, sort=False)[0]
+        climate_row = climate.loc[city_key]
+        for prefix in self.MONTHLY_COLUMNS:
+            record[f"monthly_{prefix}"] = [
+                round(float(climate_row[f"{prefix}_{month}"]), 1)
+                if pd.notna(climate_row[f"{prefix}_{month}"]) else None
+                for month in range(1, 13)
+            ]
+        record["pm25_annual"] = round(float(climate_row["pm25"]), 1)
+        record["city_key"] = city_key
+        return record
+
+    def _standardized_climate(self) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """气候特征 z-score 标准化，返回 (标准化矩阵, 原始特征矩阵)。"""
+        columns = self.climate_feature_columns()
+        raw = self.climate()[columns].astype(float)
+        raw = raw.fillna(raw.mean())
+        sigma = raw.std().replace(0, 1)
+        return (raw - raw.mean()) / sigma, raw
+
+    def similar(self, city_key: str, limit: int = 8) -> dict[str, Any]:
+        """基于逐月气候向量的余弦相似度，寻找气候最相似的城市。"""
+        standardized, _ = self._standardized_climate()
+        if city_key not in standardized.index:
+            raise KeyError(city_key)
+        limit = max(1, min(int(limit), 20))
+        target = standardized.loc[city_key]
+        norms = np.sqrt((standardized ** 2).sum(axis=1)).replace(0, np.nan)
+        target_norm = float(np.sqrt((target ** 2).sum()))
+        similarities = standardized.dot(target) / (norms * target_norm)
+        similarities = similarities.drop(city_key).sort_values(ascending=False).head(limit)
+
+        target_profile = self.city_profile(city_key)
+        items = []
+        for key, similarity in similarities.items():
+            record = self.city_profile(key)
+            record["similarity"] = round(float(similarity) * 100, 1)
+            items.append(record)
+        return {"target": target_profile, "items": items}
+
+    def plan(self, month: int, mode: str = "comfort", limit: int = 8) -> list[dict[str, Any]]:
+        """按出行月份推荐：用该城市历史同月的均温/湿度/降水与空气质量打分。"""
+        month = max(1, min(int(month), 12))
+        climate = self.climate()
+        temp_column, hum_column, pr_column = f"temp_{month}", f"hum_{month}", f"pr_{month}"
+        frame = climate[[temp_column, hum_column, pr_column, "pm25", "country", "city"]].dropna(subset=[temp_column]).copy()
+
+        conditions = self.frame["condition_normalized"].astype(str).str.lower()
+        bad_weather = conditions.str.contains("rain|storm|snow|sleet|thunder|drizzle", regex=True, na=False)
+        wet = self.frame[bad_weather].groupby("city_key").size()
+        total = self.frame.groupby("city_key").size()
+        frame["wet_share"] = frame.index.map(wet / total).fillna(0.0)
+
+        temperature_target = {"warm_sunny": 25, "cool_escape": 15}.get(mode, 23)
+        frame["temperature_score"] = bounded_target(frame[temp_column], temperature_target, 12)
+        frame["humidity_score"] = bounded_target(frame[hum_column], 55, 40)
+        frame["precipitation_score"] = bounded_inverse(frame[pr_column], 10)
+        frame["air_score"] = bounded_inverse(frame["pm25"], 100)
+        frame["wet_score"] = 1 - frame["wet_share"].clip(0, 1)
+        weights = {
+            "comfort": {"temperature_score": .38, "humidity_score": .16, "precipitation_score": .18, "air_score": .16, "wet_score": .12},
+            "clean_air": {"temperature_score": .12, "humidity_score": .08, "precipitation_score": .12, "air_score": .48, "wet_score": .20},
+            "warm_sunny": {"temperature_score": .34, "humidity_score": .10, "precipitation_score": .22, "air_score": .10, "wet_score": .24},
+            "cool_escape": {"temperature_score": .40, "humidity_score": .12, "precipitation_score": .14, "air_score": .20, "wet_score": .14},
+        }.get(mode, {"temperature_score": .38, "humidity_score": .16, "precipitation_score": .18, "air_score": .16, "wet_score": .12})
+        frame["score"] = sum(frame[column] * weight for column, weight in weights.items())
+        frame = frame.sort_values("score", ascending=False).head(max(1, min(int(limit), 20)))
+
+        items = []
+        for key, row in frame.iterrows():
+            reason_parts = []
+            if row["temperature_score"] >= 0.7:
+                reason_parts.append(f"{month}月均温 {row[temp_column]:.1f} C")
+            if row["precipitation_score"] >= 0.7:
+                reason_parts.append(f"月均降水 {row[pr_column]:.1f} mm")
+            if row["air_score"] >= 0.7:
+                reason_parts.append(f"PM2.5 {row['pm25']:.1f}")
+            items.append({
+                "city_key": key,
+                "country": row["country"],
+                "city": row["city"],
+                "temperature": round(float(row[temp_column]), 1),
+                "humidity": round(float(row[hum_column]), 0),
+                "precipitation": round(float(row[pr_column]), 1),
+                "pm25": round(float(row["pm25"]), 1),
+                "score": round(float(row["score"]) * 100, 1),
+                "reason": "；".join(reason_parts[:3]) or f"{month}月历史同期较均衡",
+            })
+        return items
+
+    def compare(self, city_keys: list[str]) -> list[dict[str, Any]]:
+        """1~4 个城市的画像对比数据。"""
+        profiles = []
+        for key in city_keys[:4]:
+            try:
+                profiles.append(self.city_profile(key))
+            except KeyError:
+                continue
+        return profiles
+
+    def forecast(self, city_key: str | None = None, days: int = 30) -> dict[str, Any]:
+        """温度趋势外推（演示用）：30 日滑动平均 + 线性回归，非气象预报。"""
+        days = max(7, min(int(days), 90))
+        if city_key:
+            if city_key not in self.climate().index:
+                raise KeyError(city_key)
+            frame = self.frame[self.frame["city_key"] == city_key]
+            target_name = str(frame["location_name"].iloc[0])
+        else:
+            frame = self.frame
+            target_name = "全球平均"
+        daily = frame.groupby("utc_date")["temperature_celsius"].mean().sort_index()
+        smoothed = daily.rolling(30, min_periods=10).mean().dropna()
+        if len(smoothed) < 60:
+            raise ValueError("该城市观测序列太短，无法拟合趋势")
+        recent = smoothed.tail(180)
+        x = np.arange(len(recent), dtype=float)
+        slope, intercept = np.polyfit(x, recent.values, 1)
+        fitted = intercept + slope * x
+        residual = recent.values - fitted
+        residual_std = float(residual.std())
+        ss_res = float((residual ** 2).sum())
+        ss_tot = float(((recent.values - recent.values.mean()) ** 2).sum())
+        r2 = 1 - ss_res / ss_tot if ss_tot else 0.0
+
+        history = [{"date": str(date.date()), "value": round(float(value), 2)} for date, value in smoothed.tail(180).items()]
+        last_date = smoothed.index[-1]
+        forecast_dates = pd.date_range(last_date + pd.Timedelta(days=1), periods=days)
+        forecast_items = [
+            {
+                "date": str(date.date()),
+                "value": round(float(intercept + slope * (len(recent) + offset)), 2),
+                "lower": round(float(intercept + slope * (len(recent) + offset) - 2 * residual_std), 2),
+                "upper": round(float(intercept + slope * (len(recent) + offset) + 2 * residual_std), 2),
+            }
+            for offset, date in enumerate(forecast_dates)
+        ]
+        return {
+            "target": target_name,
+            "city_key": city_key,
+            "history": history,
+            "forecast": forecast_items,
+            "stats": {
+                "slope_per_year": round(float(slope * 365), 2),
+                "r2": round(r2, 3),
+                "mae": round(float(np.abs(residual).mean()), 2),
+                "window_days": 30,
+                "fit_days": int(len(recent)),
+            },
+        }
+
+    def clusters(self, k: int = 5) -> dict[str, Any]:
+        """对城市气候向量做 KMeans 聚类，并按年均温升序命名气候带。"""
+        k = max(2, min(int(k), 8))
+        if k in self._clusters:
+            return self._clusters[k]
+        standardized, raw = self._standardized_climate()
+        labels, _, inertia = kmeans(standardized.values, k)
+        climate = self.climate().loc[standardized.index].copy()
+        climate["cluster"] = labels
+        temp_columns = [f"temp_{m}" for m in range(1, 13)]
+        hum_columns = [f"hum_{m}" for m in range(1, 13)]
+        pr_columns = [f"pr_{m}" for m in range(1, 13)]
+        profiles = []
+        for cluster_id in sorted(climate["cluster"].unique()):
+            group = climate[climate["cluster"] == cluster_id]
+            profiles.append({
+                "cluster": int(cluster_id),
+                "count": int(len(group)),
+                "mean_temp": round(float(group[temp_columns].mean().mean()), 1),
+                "mean_humidity": round(float(group[hum_columns].mean().mean()), 1),
+                "mean_precipitation": round(float(group[pr_columns].mean().mean()), 1),
+                "mean_pm25": round(float(group["pm25"].mean()), 1),
+                "inertia_share": None,
+            })
+        profiles.sort(key=lambda item: item["mean_temp"])
+        rename = {profile["cluster"]: number for number, profile in enumerate(profiles, 1)}
+        climate["cluster"] = climate["cluster"].map(rename)
+        for number, profile in enumerate(profiles, 1):
+            profile["cluster"] = number
+
+        latest = self.latest[["city_key", "country", "location_name", "latitude", "longitude"]].copy()
+        latest["cluster"] = latest["city_key"].map(climate["cluster"])
+        points = [
+            {
+                "city_key": row.city_key,
+                "country": row.country,
+                "city": row.location_name,
+                "latitude": float(row.latitude),
+                "longitude": float(row.longitude),
+                "cluster": int(row.cluster),
+            }
+            for row in latest.dropna(subset=["cluster"]).itertuples()
+        ]
+        payload = {
+            "k": len(profiles),
+            "inertia": round(inertia, 2),
+            "profiles": profiles,
+            "points": points,
+        }
+        self._clusters[k] = payload
+        return payload
+
     def eda_payload(self) -> dict[str, Any]:
         """EDA 交互图表所需的聚合数据，首次访问时计算并缓存。"""
 
@@ -471,14 +712,18 @@ class WeatherStore:
             "geospatial": self._latest_records(sort=False),
             "comfort": comfort,
             "domain_checks": self.summary["quality_rules"],
+            "clusters": self.clusters(5),
         }
 
 
 class WeatherRequestHandler(SimpleHTTPRequestHandler):
-    """Serve the dashboard and the JSON endpoints from one local process."""
+    """Serve the dashboard and the JSON endpoints from one local process.
 
-    def __init__(self, *args: Any, store: WeatherStore, **kwargs: Any) -> None:
-        self.store = store
+    数据仓库 WeatherStore 挂在 server.store 上而不是 handler 实例上，
+    这样 /api/admin/reload 可以在运行中替换整个数据仓库（热重载）。
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(FRONTEND_DIR), **kwargs)
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -560,6 +805,20 @@ class WeatherRequestHandler(SimpleHTTPRequestHandler):
                     self.server.session_tokens.discard(token)  # type: ignore[attr-defined]
                 self.send_json({"code": 200, "message": "已退出登录"})
                 return
+            if parsed.path == "/api/admin/reload":
+                if not self.require_auth():
+                    self.send_json({"code": 401, "message": "请先登录后再重载数据"}, status=401)
+                    return
+                print(f"[weather-system] reloading dataset: {self.server.store.data_path}")
+                new_store = WeatherStore(self.server.store.data_path)
+                self.server.store = new_store
+                summary = new_store.summary
+                self.send_json({
+                    "code": 200,
+                    "message": f"数据已重载：{summary['records']:,} 行 / {summary['locations']} 城 / {summary['countries']} 国",
+                    "summary": {"records": summary["records"], "locations": summary["locations"], "countries": summary["countries"]},
+                })
+                return
             self.send_error(404, "Endpoint not found")
         except Exception as exc:
             print(f"[weather-system] POST request failed: {exc}")
@@ -572,6 +831,10 @@ class WeatherRequestHandler(SimpleHTTPRequestHandler):
             if separator and key == name:
                 return value
         return ""
+
+    def require_auth(self) -> bool:
+        token = self.get_cookie("weather_session")
+        return bool(token) and token in self.server.session_tokens
 
     def send_local_file(self, file_path: Path) -> None:
         if not file_path.exists() or not file_path.is_file():
@@ -590,7 +853,7 @@ class WeatherRequestHandler(SimpleHTTPRequestHandler):
         query = parse_qs(parsed.query)
         try:
             if parsed.path == "/api/health":
-                self.send_json({"status": "ok", "project": self.store.summary["project_title"]})
+                self.send_json({"status": "ok", "project": self.server.store.summary["project_title"]})
                 return
             if parsed.path == "/api/auth/me":
                 token = self.get_cookie("weather_session")
@@ -610,35 +873,35 @@ class WeatherRequestHandler(SimpleHTTPRequestHandler):
                     self.send_json({"code": 401, "authenticated": False}, status=401)
                 return
             if parsed.path == "/api/summary":
-                self.send_json(self.store.summary)
+                self.send_json(self.server.store.summary)
                 return
             if parsed.path == "/api/cleaning":
-                self.send_json({"report": self.store.cleaning_report})
+                self.send_json({"report": self.server.store.cleaning_report})
                 return
             if parsed.path == "/api/eda":
-                self.send_json(self.store.eda_payload())
+                self.send_json(self.server.store.eda_payload())
                 return
             if parsed.path == "/api/trend":
                 self.send_json(
-                    {"items": self.store.trend(self._query_int(query, "days", 180))}
+                    {"items": self.server.store.trend(self._query_int(query, "days", 180))}
                 )
                 return
             if parsed.path == "/api/conditions":
                 self.send_json(
                     {
-                        "items": self.store.condition_distribution(
+                        "items": self.server.store.condition_distribution(
                             self._query_int(query, "limit", 10)
                         )
                     }
                 )
                 return
             if parsed.path == "/api/map":
-                self.send_json({"items": self.store.map_points()})
+                self.send_json({"items": self.server.store.map_points()})
                 return
             if parsed.path == "/api/cities":
                 self.send_json(
                     {
-                        "items": self.store.search_cities(
+                        "items": self.server.store.search_cities(
                             self._query_text(query, "q"),
                             self._query_int(query, "limit", 30),
                         )
@@ -648,13 +911,46 @@ class WeatherRequestHandler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/recommend":
                 self.send_json(
                     {
-                        "items": self.store.recommend(
+                        "items": self.server.store.recommend(
                             self._query_text(query, "mode", "comfort"),
                             self._query_text(query, "q"),
                             self._query_int(query, "limit", 8),
                         )
                     }
                 )
+                return
+            if parsed.path == "/api/similar":
+                key = self._query_text(query, "k")
+                try:
+                    self.send_json(self.server.store.similar(key, self._query_int(query, "limit", 8)))
+                except KeyError:
+                    self.send_json({"error": f"未知城市：{key or '(未指定)'}"}, status=404)
+                return
+            if parsed.path == "/api/plan":
+                self.send_json(
+                    {
+                        "month": max(1, min(self._query_int(query, "month", 1), 12)),
+                        "items": self.server.store.plan(
+                            self._query_int(query, "month", 1),
+                            self._query_text(query, "mode", "comfort"),
+                            self._query_int(query, "limit", 8),
+                        ),
+                    }
+                )
+                return
+            if parsed.path == "/api/compare":
+                keys = [value for value in query.get("k", []) if value][:4]
+                self.send_json({"items": self.server.store.compare(keys)})
+                return
+            if parsed.path == "/api/forecast":
+                key = self._query_text(query, "k")
+                try:
+                    self.send_json(self.server.store.forecast(key or None, self._query_int(query, "days", 30)))
+                except KeyError:
+                    self.send_json({"error": f"未知城市：{key}"}, status=404)
+                return
+            if parsed.path == "/api/clusters":
+                self.send_json(self.server.store.clusters(self._query_int(query, "k", 5)))
                 return
             if parsed.path.startswith("/figures/"):
                 filename = Path(unquote(parsed.path.removeprefix("/figures/"))).name
@@ -689,8 +985,8 @@ def main() -> None:
 
     print(f"[weather-system] loading {args.data}")
     store = WeatherStore(args.data)
-    handler = partial(WeatherRequestHandler, store=store)
-    server = ThreadingHTTPServer((args.host, args.port), handler)
+    server = ThreadingHTTPServer((args.host, args.port), WeatherRequestHandler)
+    server.store = store
     server.session_tokens = set()
     print(f"[weather-system] {store.summary['project_title']}")
     print(f"[weather-system] open http://{args.host}:{args.port}/")

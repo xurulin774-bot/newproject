@@ -16,12 +16,24 @@ const state = {
   cityPage: 1,
   recommendMode: "comfort",
   recommendQuery: "",
+  similarQuery: "",
+  similarResult: null,
+  planMonth: new Date().getMonth() + 1,
+  planMode: "comfort",
+  planItems: null,
+  compareQuery: "",
+  compareKeys: [],
+  compareData: null,
+  forecastData: null,
 };
 
 const routes = {
   "/dashboard": { title: "数据仪表盘", section: "数据总览" },
   "/city-data": { title: "城市数据管理", section: "数据管理" },
+  "/compare": { title: "城市对比", section: "数据管理" },
   "/recommend": { title: "出行推荐中心", section: "智能推荐" },
+  "/similar": { title: "相似城市", section: "智能推荐" },
+  "/plan": { title: "出行规划", section: "智能推荐" },
   "/eda": { title: "EDA 分析图谱", section: "分析洞察" },
   "/quality": { title: "数据质量检查", section: "分析洞察" },
   "/system": { title: "系统说明", section: "系统管理" },
@@ -34,11 +46,18 @@ const navGroups = [
   },
   {
     label: "数据管理",
-    items: [{ path: "/city-data", icon: "⌁", label: "城市数据" }],
+    items: [
+      { path: "/city-data", icon: "⌁", label: "城市数据" },
+      { path: "/compare", icon: "⇄", label: "城市对比" },
+    ],
   },
   {
     label: "智能推荐",
-    items: [{ path: "/recommend", icon: "✦", label: "推荐中心" }],
+    items: [
+      { path: "/recommend", icon: "✦", label: "推荐中心" },
+      { path: "/similar", icon: "◈", label: "相似城市" },
+      { path: "/plan", icon: "◔", label: "出行规划" },
+    ],
   },
   {
     label: "分析洞察",
@@ -63,6 +82,7 @@ const edaCharts = [
   ["eda-geo", "全球空间分布", "最新观测的城市温度快照"],
   ["eda-comfort", "环境指标关系", "湿度区间下的能见度与降水"],
   ["eda-quality", "领域质量检查", "异常值边界规则检查结果"],
+  ["eda-clusters", "气候分区（KMeans 聚类）", "按逐月气候向量将城市聚为 5 个气候带，图例可开关"],
 ];
 
 // ---- ECharts 基础设施：实例登记、销毁、世界地图懒加载 ----
@@ -467,6 +487,242 @@ function translateRecommendData() {
   });
 }
 
+// ---------------- 相似城市（余弦相似度） ----------------
+
+function renderSimilar() {
+  document.getElementById("page-root").innerHTML = `${pageHeader("SIMILAR CITIES", "相似城市", "基于逐月气温、湿度、降水曲线与空气质量的标准化向量，用余弦相似度寻找气候最相近的城市。", '<span class="rule-badge">余弦相似度 · 37 维气候向量</span>')}<section class="content-card"><div class="filter-bar"><label class="search-field"><span>⌕</span><input id="similar-search" value="${esc(state.similarQuery)}" placeholder="搜索目标城市，如 Beijing / Paris / 中国" /></label><button class="primary-button" id="similar-search-button">查找城市</button><span class="filter-hint">选择一个目标城市，找出与其气候最相似的其他城市</span></div><div id="similar-suggestions" class="chip-row"></div></section><div id="similar-result"></div>`;
+  document.getElementById("similar-search-button").addEventListener("click", searchSimilarCities);
+  document.getElementById("similar-search").addEventListener("keydown", (event) => { if (event.key === "Enter") searchSimilarCities(); });
+  if (state.similarResult) renderSimilarResult();
+}
+
+async function searchSimilarCities() {
+  state.similarQuery = document.getElementById("similar-search").value.trim();
+  const box = document.getElementById("similar-suggestions");
+  if (!box) return;
+  box.innerHTML = '<span class="muted">搜索中...</span>';
+  try {
+    const result = await api(`/api/cities?q=${encodeURIComponent(state.similarQuery)}&limit=10`);
+    const items = result.items || [];
+    box.innerHTML = items.length
+      ? items.map((item) => `<button class="chip" data-key="${esc(`${item.country} | ${item.city}`)}">${esc(displayCity(item.city))} · ${esc(displayCountry(item.country))}</button>`).join("")
+      : '<span class="muted">没有匹配的城市</span>';
+    box.querySelectorAll(".chip").forEach((chip) => chip.addEventListener("click", () => runSimilar(chip.dataset.key)));
+  } catch (error) { box.innerHTML = `<span class="warning-text">${esc(error.message)}</span>`; }
+}
+
+async function runSimilar(key) {
+  state.similarKey = key;
+  const box = document.getElementById("similar-result");
+  if (!box) return;
+  box.innerHTML = '<div class="loading-state"><span class="spinner"></span>正在计算气候相似度...</div>';
+  try {
+    state.similarResult = await api(`/api/similar?k=${encodeURIComponent(key)}&limit=8`);
+    renderSimilarResult();
+  } catch (error) { box.innerHTML = `<div class="error-panel"><strong>计算失败</strong><p>${esc(error.message)}</p></div>`; }
+}
+
+function renderSimilarResult() {
+  const box = document.getElementById("similar-result");
+  if (!box || !state.similarResult) return;
+  const result = state.similarResult;
+  const target = result.target;
+  box.innerHTML = `
+    <div class="dashboard-grid"><section class="content-card"><div class="card-heading"><div><p class="kicker">TARGET</p><h2>目标城市 · ${esc(displayCity(target.city))}</h2></div><span class="muted">${esc(displayCountry(target.country))}</span></div><div id="similar-chart" class="echart-box"></div></section>
+    <section class="content-card"><div class="card-heading"><div><p class="kicker">MATCHES</p><h2>气候相似城市 Top ${result.items.length}</h2></div><span class="muted">余弦相似度 0-100</span></div><div class="compact-list">${result.items.map((item, index) => `<div class="compact-item"><span class="compact-rank">${String(index + 1).padStart(2, "0")}</span><div><strong>${esc(displayCity(item.city))}</strong><small>${esc(displayCountry(item.country))} · ${fmt(item.temperature)}°C · 湿度 ${fmt(item.humidity, 0)}%</small></div><b>${fmt(item.similarity)}<em>分</em></b></div>`).join("")}</div></section></div>
+    <p class="page-description" style="margin-top:14px">折线图为目标城市与相似度前 5 城市的逐月平均气温对比，曲线越接近表示气候节律越一致。</p>`;
+  mountSimilarChart();
+}
+
+function mountSimilarChart() {
+  const result = state.similarResult;
+  if (!result || !document.getElementById("similar-chart")) return;
+  const series = [
+    {
+      name: `${displayCity(result.target.city)}（目标）`, type: "line", smooth: true, showSymbol: false,
+      data: result.target.monthly_temp, z: 3, lineStyle: { width: 3, color: "#123c39" }, itemStyle: { color: "#123c39" },
+    },
+    ...result.items.slice(0, 5).map((item, index) => ({
+      name: displayCity(item.city), type: "line", smooth: true, showSymbol: false,
+      data: item.monthly_temp, lineStyle: { width: 1.6, color: chartPalette[index % chartPalette.length] }, itemStyle: { color: chartPalette[index % chartPalette.length] },
+    })),
+  ];
+  mountChart("similar-chart", {
+    tooltip: { trigger: "axis", textStyle: { fontSize: 11 }, valueFormatter: (value) => `${fmt(value)} °C` },
+    legend: { top: 0, textStyle: { fontSize: 9 }, type: "scroll" },
+    grid: { left: 36, right: 14, top: 32, bottom: 24 },
+    xAxis: { type: "category", data: ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"], axisLabel: { fontSize: 10 }, axisLine: { lineStyle: { color: "#d7e2dd" } } },
+    yAxis: { type: "value", scale: true, axisLabel: { fontSize: 10, formatter: "{value}°" }, splitLine: { lineStyle: { color: "#e7efec" } } },
+    series,
+  });
+}
+
+// ---------------- 出行规划（按月份的历史同期均值评分） ----------------
+
+function renderPlan() {
+  const months = Array.from({ length: 12 }, (_, index) => index + 1);
+  const modes = { comfort: "综合舒适", clean_air: "清新空气", warm_sunny: "温暖晴朗", cool_escape: "清凉避暑" };
+  document.getElementById("page-root").innerHTML = `${pageHeader("TRAVEL PLANNER", "出行规划", "选择出行月份，系统用各城市历史同月的均温、湿度、降水与空气质量进行规则评分，回答“这个月去哪里最舒服”。", '<span class="rule-badge">历史同期均值 · 非天气预报</span>')}<section class="content-card"><div class="recommend-toolbar"><div class="segmented-control">${months.map((month) => `<button class="segment ${state.planMonth === month ? "active" : ""}" data-month="${month}">${month}月</button>`).join("")}</div></div><div class="recommend-toolbar"><div class="segmented-control">${Object.entries(modes).map(([value, label]) => `<button class="segment ${state.planMode === value ? "active" : ""}" data-mode="${value}">${label}</button>`).join("")}</div></div></section><div id="plan-result"></div>`;
+  document.querySelectorAll("[data-month]").forEach((button) => button.addEventListener("click", () => { state.planMonth = Number(button.dataset.month); renderPlan(); loadPlan(); }));
+  document.querySelectorAll("[data-mode]").forEach((button) => button.addEventListener("click", () => { state.planMode = button.dataset.mode; renderPlan(); loadPlan(); }));
+  if (state.planItems) renderPlanResult(); else loadPlan();
+}
+
+async function loadPlan() {
+  const box = document.getElementById("plan-result");
+  if (!box) return;
+  box.innerHTML = '<div class="loading-state"><span class="spinner"></span>正在按历史同期均值评分...</div>';
+  try {
+    const result = await api(`/api/plan?month=${state.planMonth}&mode=${state.planMode}&limit=8`);
+    state.planItems = result.items || [];
+    renderPlanResult();
+  } catch (error) { box.innerHTML = `<div class="error-panel"><strong>加载失败</strong><p>${esc(error.message)}</p></div>`; }
+}
+
+function renderPlanResult() {
+  const box = document.getElementById("plan-result");
+  if (!box) return;
+  const items = state.planItems || [];
+  box.innerHTML = `<section class="content-card recommend-card"><div class="card-heading"><div><p class="kicker">${state.planMonth}月 · ${ { comfort: "综合舒适", clean_air: "清新空气", warm_sunny: "温暖晴朗", cool_escape: "清凉避暑" }[state.planMode] }</p><h2>推荐出行城市</h2></div><span class="muted">基于 ${dateText(state.summary?.time_start)} 至 ${dateText(state.summary?.time_end)} 的历史同期观测</span></div><div class="recommend-grid">${items.length ? items.map((item, index) => `<article class="recommend-card-item"><div class="recommend-number">${String(index + 1).padStart(2, "0")}</div><div class="recommend-main"><div class="recommend-title"><div><p>${esc(displayCountry(item.country))}</p><h3>${esc(displayCity(item.city))}</h3></div><strong>${fmt(item.score)}<small> / 100</small></strong></div><div class="recommend-meta"><span>均温 ${fmt(item.temperature)}°C</span><span>湿度 ${fmt(item.humidity, 0)}%</span><span>降水 ${fmt(item.precipitation)}mm</span><span>PM2.5 ${fmt(item.pm25)}</span></div><p class="recommend-reason">推荐理由：${esc(item.reason)}</p></div></article>`).join("") : '<div class="empty-state">没有匹配的推荐城市</div>'}</div></section>`;
+}
+
+// ---------------- 城市对比（逐月曲线 + 指标雷达 + 趋势外推） ----------------
+
+function renderCompare() {
+  document.getElementById("page-root").innerHTML = `${pageHeader("CITY COMPARISON", "城市对比", "选择 1~4 个城市，对比逐月气温曲线、最新观测指标雷达图与温度趋势外推；不选城市时展示全球平均。", '<span class="data-badge">最多 4 城</span>')}<section class="content-card"><div class="filter-bar"><label class="search-field"><span>⌕</span><input id="compare-search" value="${esc(state.compareQuery)}" placeholder="搜索要加入对比的城市" /></label><button class="primary-button" id="compare-search-button">搜索</button><span class="filter-hint">点击候选城市加入对比（${state.compareKeys.length}/4）</span></div><div id="compare-suggestions" class="chip-row"></div><div id="compare-selected" class="chip-row"></div></section><div id="compare-result"></div>`;
+  document.getElementById("compare-search-button").addEventListener("click", searchCompareCities);
+  document.getElementById("compare-search").addEventListener("keydown", (event) => { if (event.key === "Enter") searchCompareCities(); });
+  renderCompareSelected();
+  refreshCompare();
+}
+
+function renderCompareSelected() {
+  const box = document.getElementById("compare-selected");
+  if (!box) return;
+  box.innerHTML = state.compareKeys.map((key) => `<button class="chip active" data-remove="${esc(key)}">${esc(displayCity(key.split(" | ")[1]))} ✕</button>`).join("");
+  box.querySelectorAll("[data-remove]").forEach((chip) => chip.addEventListener("click", () => {
+    state.compareKeys = state.compareKeys.filter((key) => key !== chip.dataset.remove);
+    renderCompareSelected();
+    refreshCompare();
+  }));
+}
+
+async function searchCompareCities() {
+  state.compareQuery = document.getElementById("compare-search").value.trim();
+  const box = document.getElementById("compare-suggestions");
+  if (!box) return;
+  box.innerHTML = '<span class="muted">搜索中...</span>';
+  try {
+    const result = await api(`/api/cities?q=${encodeURIComponent(state.compareQuery)}&limit=10`);
+    const items = (result.items || []).filter((item) => !state.compareKeys.includes(`${item.country} | ${item.city}`));
+    box.innerHTML = items.length
+      ? items.map((item) => `<button class="chip" data-key="${esc(`${item.country} | ${item.city}`)}">${esc(displayCity(item.city))} · ${esc(displayCountry(item.country))}</button>`).join("")
+      : '<span class="muted">没有匹配的城市</span>';
+    box.querySelectorAll(".chip").forEach((chip) => chip.addEventListener("click", () => {
+      if (state.compareKeys.length >= 4 || state.compareKeys.includes(chip.dataset.key)) return;
+      state.compareKeys.push(chip.dataset.key);
+      renderCompareSelected();
+      refreshCompare();
+    }));
+  } catch (error) { box.innerHTML = `<span class="warning-text">${esc(error.message)}</span>`; }
+}
+
+async function refreshCompare() {
+  const container = document.getElementById("compare-result");
+  if (!container) return;
+  container.innerHTML = '<div class="loading-state"><span class="spinner"></span>正在加载对比数据...</div>';
+  try {
+    const params = state.compareKeys.map((key) => `k=${encodeURIComponent(key)}`).join("&");
+    const [profiles, forecast] = await Promise.all([
+      state.compareKeys.length ? api(`/api/compare?${params}`) : api("/api/compare"),
+      api(`/api/forecast?${state.compareKeys.length ? `k=${encodeURIComponent(state.compareKeys[0])}&` : ""}days=30`),
+    ]);
+    state.compareData = profiles.items || [];
+    state.forecastData = forecast;
+    renderCompareResult();
+  } catch (error) { container.innerHTML = `<div class="error-panel"><strong>加载失败</strong><p>${esc(error.message)}</p></div>`; }
+}
+
+function renderCompareResult() {
+  const container = document.getElementById("compare-result");
+  if (!container || !state.forecastData) return;
+  const profiles = state.compareData || [];
+  const forecast = state.forecastData;
+  const metrics = [
+    ["温度", "temperature", "°C"], ["体感", "feels_like", "°C"], ["湿度", "humidity", "%"],
+    ["降水", "precipitation", "mm"], ["风速", "wind", "kph"], ["能见度", "visibility", "km"],
+    ["紫外线", "uv", ""], ["PM2.5", "pm25", ""],
+  ];
+  container.innerHTML = `
+    <div class="dashboard-grid"><section class="content-card"><div class="card-heading"><div><p class="kicker">MONTHLY PROFILE</p><h2>逐月平均气温对比</h2></div></div><div id="compare-months" class="echart-box"></div></section>
+    <section class="content-card"><div class="card-heading"><div><p class="kicker">LATEST INDICATORS</p><h2>最新观测指标雷达</h2></div></div><div id="compare-radar" class="echart-box"></div></section></div>
+    <section class="content-card" style="margin-top:18px"><div class="card-heading"><div><p class="kicker">TREND EXTRAPOLATION</p><h2>温度趋势外推 · ${esc(forecast.target)}</h2></div><span class="muted">30 日滑动均值 + 线性回归，演示用途非气象预报</span></div><div id="compare-forecast" class="echart-box"></div></section>
+    <section class="content-card" style="margin-top:18px"><div class="card-heading"><div><p class="kicker">SUMMARY TABLE</p><h2>关键指标对照</h2></div></div><div class="table-wrap"><table><thead><tr><th>指标</th>${profiles.map((profile) => `<th>${esc(displayCity(profile.city))}<small style="display:block;color:var(--muted);font-weight:400">${esc(displayCountry(profile.country))}</small></th>`).join("") || "<th>全球平均</th>"}</tr></thead><tbody>${metrics.map(([label, field, unit]) => `<tr><td>${label}</td>${profiles.length ? profiles.map((profile) => `<td class="number-cell">${fmt(profile[field])} ${unit}</td>`).join("") : "<td>-</td>"}</tr>`).join("")}</tbody></table></div></section>`;
+  mountCompareCharts();
+}
+
+function mountCompareCharts() {
+  const profiles = state.compareData || [];
+  if (profiles.length) {
+    mountChart("compare-months", {
+      tooltip: { trigger: "axis", textStyle: { fontSize: 11 }, valueFormatter: (value) => `${fmt(value)} °C` },
+      legend: { top: 0, textStyle: { fontSize: 10 } },
+      grid: { left: 36, right: 14, top: 32, bottom: 24 },
+      xAxis: { type: "category", data: ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"], axisLabel: { fontSize: 10 }, axisLine: { lineStyle: { color: "#d7e2dd" } } },
+      yAxis: { type: "value", scale: true, axisLabel: { fontSize: 10, formatter: "{value}°" }, splitLine: { lineStyle: { color: "#e7efec" } } },
+      series: profiles.map((profile, index) => ({
+        name: displayCity(profile.city), type: "line", smooth: true, showSymbol: false, data: profile.monthly_temp,
+        lineStyle: { width: 2.2, color: chartPalette[index % chartPalette.length] }, itemStyle: { color: chartPalette[index % chartPalette.length] },
+      })),
+    });
+    mountChart("compare-radar", {
+      legend: { top: 0, textStyle: { fontSize: 10 } },
+      tooltip: { textStyle: { fontSize: 11 } },
+      radar: {
+        indicator: [
+          { name: "温度 °C", max: 45 }, { name: "湿度 %", max: 100 }, { name: "降水 mm", max: 50 },
+          { name: "风速 kph", max: 40 }, { name: "能见度 km", max: 20 }, { name: "PM2.5", max: 150 },
+        ],
+        radius: "58%", axisName: { fontSize: 10, color: "#51635f" },
+        splitLine: { lineStyle: { color: "#e1e9e6" } }, splitArea: { show: false },
+      },
+      series: [{
+        type: "radar",
+        data: profiles.map((profile, index) => ({
+          name: displayCity(profile.city),
+          value: [profile.temperature, profile.humidity, profile.precipitation, profile.wind, profile.visibility, profile.pm25],
+          lineStyle: { width: 2, color: chartPalette[index % chartPalette.length] },
+          itemStyle: { color: chartPalette[index % chartPalette.length] },
+          areaStyle: { opacity: 0.12 },
+        })),
+      }],
+    });
+  } else {
+    const months = document.getElementById("compare-months");
+    const radar = document.getElementById("compare-radar");
+    if (months) months.innerHTML = '<div class="empty-state">尚未选择对比城市，展示全球平均见下方趋势图</div>';
+    if (radar) radar.innerHTML = '<div class="empty-state">选择城市后展示指标雷达图</div>';
+  }
+  const forecast = state.forecastData;
+  if (!forecast || !document.getElementById("compare-forecast")) return;
+  const historyLength = forecast.history.length;
+  const dates = [...forecast.history.map((item) => item.date), ...forecast.forecast.map((item) => item.date)];
+  mountChart("compare-forecast", {
+    tooltip: { trigger: "axis", textStyle: { fontSize: 11 }, valueFormatter: (value) => `${fmt(value)} °C` },
+    legend: { data: ["30 日滑动均值", "线性外推", "±2σ 区间"], top: 0, textStyle: { fontSize: 10 } },
+    grid: { left: 40, right: 14, top: 32, bottom: 42 },
+    xAxis: { type: "category", data: dates, boundaryGap: false, axisLabel: { fontSize: 9 } },
+    yAxis: { type: "value", scale: true, axisLabel: { fontSize: 10, formatter: "{value}°" }, splitLine: { lineStyle: { color: "#e7efec" } } },
+    dataZoom: [{ type: "inside" }, { type: "slider", height: 14, bottom: 4, textStyle: { fontSize: 9 } }],
+    series: [
+      { name: "下界", type: "line", stack: "band", data: [...Array(historyLength).fill(null), ...forecast.forecast.map((item) => item.lower)], lineStyle: { opacity: 0 }, symbol: "none", silent: true },
+      { name: "区间", type: "line", stack: "band", data: [...Array(historyLength).fill(null), ...forecast.forecast.map((item) => item.upper - item.lower)], lineStyle: { opacity: 0 }, symbol: "none", silent: true, areaStyle: { color: "rgba(75,128,186,.16)" } },
+      { name: "30 日滑动均值", type: "line", data: forecast.history.map((item) => item.value), showSymbol: false, z: 3, lineStyle: { width: 2, color: "#1b8278" }, itemStyle: { color: "#1b8278" } },
+      { name: "线性外推", type: "line", data: [...Array(historyLength).fill(null), ...forecast.forecast.map((item) => item.value)], showSymbol: false, z: 3, lineStyle: { width: 2, color: "#dd765b", type: "dashed" }, itemStyle: { color: "#dd765b" } },
+    ],
+  });
+}
+
 function renderEda(data) {
   document.getElementById("page-root").innerHTML = `${pageHeader("EXPLORATORY DATA ANALYSIS", "EDA 分析图谱", "九组交互图表从时间、空间、天气、空气质量和数据质量多个维度审视数据集。", '<span class="data-badge">ECharts 交互图表</span>')}<section class="eda-grid">${edaCharts.map(([id, title, desc]) => `<figure class="eda-card"><div class="eda-chart" id="${id}"></div><figcaption><strong>${esc(title)}</strong><span>${esc(desc)}</span></figcaption></figure>`).join("")}</section>`;
   mountEdaCharts(data);
@@ -607,6 +863,34 @@ function mountEdaCharts(data) {
       }],
     });
   } else { document.getElementById("eda-quality").innerHTML = '<div class="empty-state">暂无数据</div>'; }
+
+  const clusters = data.clusters;
+  if (clusters?.points?.length) {
+    ensureWorldMap().then(() => mountChart("eda-clusters", clusterMapOption(clusters))).catch(() => {
+      document.getElementById("eda-clusters").innerHTML = '<div class="empty-state">世界地图资源加载失败</div>';
+    });
+  } else { document.getElementById("eda-clusters").innerHTML = '<div class="empty-state">暂无数据</div>'; }
+}
+
+function clusterMapOption(clusters) {
+  return {
+    tooltip: {
+      trigger: "item", textStyle: { fontSize: 11 },
+      formatter: (params) => `${displayCity(params.data[2])} · ${displayCountry(params.data[3])}<br/>${params.seriesName}`,
+    },
+    legend: { type: "scroll", top: 0, textStyle: { fontSize: 9 }, pageIconSize: 8 },
+    geo: {
+      map: "world", roam: true, scaleLimit: { min: 0.7, max: 10 },
+      itemStyle: { areaColor: "#eef4f1", borderColor: "#c9dcd3" },
+      emphasis: { label: { show: false } },
+    },
+    series: clusters.profiles.map((profile, index) => ({
+      name: `气候带${profile.cluster}：均温 ${profile.mean_temp}°C · ${profile.count} 城`,
+      type: "scatter", coordinateSystem: "geo", symbolSize: 7,
+      itemStyle: { color: chartPalette[index % chartPalette.length], opacity: 0.8 },
+      data: clusters.points.filter((point) => point.cluster === profile.cluster).map((point) => [point.longitude, point.latitude, point.city, point.country]),
+    })),
+  };
 }
 
 function renderQuality() {
@@ -630,7 +914,21 @@ function renderQuality() {
 }
 
 function renderSystem() {
-  document.getElementById("page-root").innerHTML = `${pageHeader("SYSTEM INFORMATION", "系统说明", "项目部署、数据替换与算法逻辑说明，方便后续扩展为新的数据分析项目。", '<span class="data-badge">本地部署</span>')}<div class="system-grid"><section class="content-card system-hero"><span class="system-logo">WX</span><div><p class="kicker">PROJECT TITLE</p><h2>全球城市天气数据分析与出行推荐系统</h2><p>面向全球城市天气观测数据的分析型后台，提供数据概览、城市查询、规则推荐、EDA 图谱与质量检查。</p></div></section><section class="content-card"><div class="card-heading"><div><p class="kicker">PROJECT MODULES</p><h2>功能模块</h2></div></div><div class="module-list"><div><b>01</b><span><strong>数据仪表盘</strong><small>规模、趋势、天气状况、全球空间分布</small></span></div><div><b>02</b><span><strong>城市数据管理</strong><small>支持国家或城市关键词查询与分页浏览</small></span></div><div><b>03</b><span><strong>出行推荐中心</strong><small>四种策略的可解释规则评分</small></span></div><div><b>04</b><span><strong>EDA 与质量检查</strong><small>图表资产和数据边界检查集中呈现</small></span></div></div></section><section class="content-card data-replace"><div class="card-heading"><div><p class="kicker">DATA REPLACEMENT</p><h2>更换数据集</h2></div></div><p>将新的 CSV 文件放入 <code>data/raw/</code>，并保持后端必需字段名称；重新运行 EDA 脚本即可生成新的画像与图表。项目不依赖 Downloads 目录中的原始文件。</p><div class="code-line">python algorithm/run_eda.py --data data/raw/GlobalWeatherRepository.csv</div></section><section class="content-card account-card"><div class="card-heading"><div><p class="kicker">DEMO ACCESS</p><h2>当前登录账号</h2></div></div><div class="account-row"><span class="avatar large">A</span><div><strong>admin</strong><small>系统管理员 / 本地演示账号</small></div><span class="login-state">已登录</span></div></section></div>`;
+  document.getElementById("page-root").innerHTML = `${pageHeader("SYSTEM INFORMATION", "系统说明", "项目部署、数据替换与算法逻辑说明，方便后续扩展为新的数据分析项目。", '<span class="data-badge">本地部署</span>')}<div class="system-grid"><section class="content-card system-hero"><span class="system-logo">WX</span><div><p class="kicker">PROJECT TITLE</p><h2>全球城市天气数据分析与出行推荐系统</h2><p>面向全球城市天气观测数据的分析型后台，提供数据概览、城市查询、规则推荐、EDA 图谱与质量检查。</p></div></section><section class="content-card"><div class="card-heading"><div><p class="kicker">PROJECT MODULES</p><h2>功能模块</h2></div></div><div class="module-list"><div><b>01</b><span><strong>数据仪表盘</strong><small>规模、趋势、天气状况、全球空间分布</small></span></div><div><b>02</b><span><strong>城市数据管理</strong><small>支持国家或城市关键词查询与分页浏览</small></span></div><div><b>03</b><span><strong>出行推荐中心</strong><small>四种策略的可解释规则评分</small></span></div><div><b>04</b><span><strong>EDA 与质量检查</strong><small>图表资产和数据边界检查集中呈现</small></span></div></div></section><section class="content-card data-replace"><div class="card-heading"><div><p class="kicker">DATA REPLACEMENT</p><h2>更换数据集</h2></div></div><p>将新的 CSV 文件放入 <code>data/raw/</code>，并保持后端必需字段名称；重新运行 EDA 脚本即可生成新的画像与图表。项目不依赖 Downloads 目录中的原始文件。</p><div class="code-line">python algorithm/run_eda.py --data data/raw/GlobalWeatherRepository.csv</div><div class="filter-bar" style="margin-top:14px"><button class="secondary-button" id="reload-data-button">↻ 重新加载数据集</button><span id="reload-data-message" class="muted">替换 data/raw 下的 CSV 后，点击即可热重载，无需重启服务</span></div></section><section class="content-card account-card"><div class="card-heading"><div><p class="kicker">DEMO ACCESS</p><h2>当前登录账号</h2></div></div><div class="account-row"><span class="avatar large">A</span><div><strong>admin</strong><small>系统管理员 / 本地演示账号</small></div><span class="login-state">已登录</span></div></section></div>`;
+  const reloadButton = document.getElementById("reload-data-button");
+  if (reloadButton) {
+    reloadButton.addEventListener("click", async () => {
+      const message = document.getElementById("reload-data-message");
+      reloadButton.disabled = true;
+      if (message) message.textContent = "正在重新读取 CSV 并清洗...";
+      try {
+        const result = await api("/api/admin/reload", { method: "POST" });
+        if (message) message.textContent = result.message || "数据已重载";
+        state.summary = null;
+      } catch (error) { if (message) message.textContent = `重载失败：${error.message}`; }
+      reloadButton.disabled = false;
+    });
+  }
 }
 
 function renderError(message) { document.getElementById("page-root").innerHTML = `<div class="error-panel"><strong>页面加载失败</strong><p>${esc(message)}</p><button class="primary-button" onclick="window.location.reload()">重新加载</button></div>`; }
@@ -642,6 +940,9 @@ async function renderPage() {
   if (state.route === "/dashboard") return loadDashboard();
   if (state.route === "/city-data") { try { await loadCities(); } catch (error) { renderError(error.message); } return; }
   if (state.route === "/recommend") return loadRecommend();
+  if (state.route === "/similar") { renderSimilar(); return; }
+  if (state.route === "/plan") { renderPlan(); return; }
+  if (state.route === "/compare") { renderCompare(); return; }
   if (state.route === "/eda") {
     try {
       const data = await api("/api/eda");
