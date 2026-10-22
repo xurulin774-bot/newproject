@@ -1,0 +1,57 @@
+server:
+  address: 127.0.0.1
+  port: ${SERVER_PORT:8091}
+  tomcat:
+    basedir: ${TOMCAT_BASEDIR:./.runtime/tomcat}
+  servlet:
+    session:
+      cookie:
+        http-only: true
+        same-site: lax
+
+spring:
+  application:
+    name: weather-system-springboot
+  web:
+    resources:
+      cache:
+        cachecontrol:
+          no-cache: true
+  datasource:
+    url: jdbc:h2:file:./data/weatherdb;MODE=MySQL;DB_CLOSE_ON_EXIT=FALSE
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 105MB
+  jackson:
+    default-property-inclusion: non_null
+
+weather:
+  data-file: ${WEATHER_DATA_FILE:./data/raw/GlobalWeatherRepository.csv}
+  profile-dir: ${WEATHER_PROFILE_DIR:./data/profile}
+  figures-dir: ${WEATHER_FIGURES_DIR:./figures}
+  python-command: ${PYTHON_COMMAND:python}
+  admin:
+    username: ${WEATHER_ADMIN_USERNAME:admin}
+    password: ${WEATHER_ADMIN_PASSWORD:123456}
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      id-type: auto
+
+logging:
+  level:
+    root: INFO
+    com.weatherlab.weather: INFO
+  file:
+    name: logs/weather-system.log

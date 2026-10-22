@@ -1,0 +1,24 @@
+target/
+.idea/
+.vscode/
+.venv/
+*.iml
+logs/
+.runtime/
+data/weatherdb.mv.db
+data/weatherdb.trace.db
+data/raw/*-20*.csv
+__pycache__/
+
+# LibreOffice / 文档处理临时目录与 Word 锁文件
+doc/qa-*/
+doc/qa_ascii*/
+doc/~$*.docx
+~$*.docx
+
+# 环境变量（保留 .env.example）
+.env
+
+# 系统文件
+.DS_Store
+Thumbs.db
