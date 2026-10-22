@@ -22,3 +22,9 @@ doc/~$*.docx
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# 报告构建与渲染临时产物
+doc/_build/node_modules/
+doc/_pages4/
+doc/*.pdf
+doc/_exp4*
