@@ -20,3 +20,6 @@ doc/_build/node_modules/
 doc/_build/package-lock.json
 doc/_pages/
 doc/*.pdf
+
+# Word 锁文件
+doc/~$*.docx
