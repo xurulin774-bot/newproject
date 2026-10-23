@@ -28,3 +28,7 @@ doc/_build/node_modules/
 doc/_pages4/
 doc/*.pdf
 doc/_exp4*
+doc/_pages5/
+doc/*.pdf
+frontend/dist/
+doc/_exp5.docx
