@@ -61,11 +61,14 @@ const state = {
   conditions: [],
   map: [],
   recommend: [],
+  recommendWeights: [],
   cities: [],
   loading: false,
   error: "",
   cityQuery: "",
   cityPage: 1,
+  cityTotal: 0,
+  cityPageSize: 10,
   recommendMode: "comfort",
   recommendQuery: "",
   similarQuery: "",
@@ -78,6 +81,7 @@ const state = {
   planMonth: new Date().getMonth() + 1,
   planMode: "comfort",
   planItems: null,
+  planWeights: [],
   compareQuery: "",
   compareKeys: [],
   compareData: null,
@@ -87,6 +91,11 @@ const state = {
   datasetTotal: 0,
   datasetPageSize: 10,
   datasetUploading: false,
+  datasetPreview: null,
+  datasetPreviewValidation: null,
+  datasetActivating: false,
+  mlTrainingTaskId: null,
+  mlTrainingTimer: null,
 };
 
 const routes = {
@@ -113,9 +122,13 @@ const navGroups = [
     label: "数据管理",
     items: [
       { path: "/city-data", icon: "⌁", label: "城市数据" },
-      { path: "/datasets", icon: "⇧", label: "天气数据集", adminOnly: true },
       { path: "/compare", icon: "⇄", label: "城市对比" },
     ],
+  },
+  {
+    label: "管理员专属",
+    adminOnly: true,
+    items: [{ path: "/datasets", icon: "⇧", label: "数据集管理" }],
   },
   {
     label: "智能推荐",
@@ -473,7 +486,37 @@ async function searchRecommendations(query, mode, limit = 30) {
   for (const result of results) {
     for (const item of result.items || []) items.set(item.city_key || `${item.country} | ${item.city}`, item);
   }
-  return { items: [...items.values()].sort((left, right) => Number(right.score) - Number(left.score)).slice(0, limit) };
+  return {
+    mode: results[0]?.mode || mode,
+    mode_label: results[0]?.mode_label || "",
+    weights: results[0]?.weights || [],
+    items: [...items.values()].sort((left, right) => Number(right.score) - Number(left.score)).slice(0, limit),
+  };
+}
+
+const recommendationFactorLabels = {
+  temperature: "温度", humidity: "湿度", rain: "降水", air: "空气质量",
+  visibility: "能见度", cloud: "云量", condition: "天气状况",
+};
+
+function recommendationFactorLabel(key) { return recommendationFactorLabels[key] || String(key || "其他因素"); }
+
+function renderStrategyWeights(weights) {
+  if (!weights?.length) return "";
+  return `<div class="strategy-weight-row"><span>当前策略权重</span>${weights.map((item) => `<b>${esc(recommendationFactorLabel(item.key))} ${fmt(item.weight, 1)}%</b>`).join("")}</div>`;
+}
+
+function renderScoreDetails(item, includeBreakdown = true) {
+  const positive = item.positive_factors || [];
+  const negative = item.negative_factors || [];
+  const breakdown = item.score_breakdown || [];
+  const factorPills = (factors, type) => factors.length
+    ? factors.map((factor) => `<span class="score-factor ${type}">${esc(recommendationFactorLabel(factor.key))} ${type === "positive" ? `+${fmt(factor.contribution)}分` : `得分 ${fmt(factor.factor_score)}`}</span>`).join("")
+    : '<span class="muted">暂无</span>';
+  const breakdownMarkup = includeBreakdown && breakdown.length
+    ? `<div class="score-breakdown">${breakdown.map((factor) => `<div><i>${esc(recommendationFactorLabel(factor.key))}</i><b>${fmt(factor.contribution)}分</b><small>权重 ${fmt(factor.weight, 1)}% · 因素得分 ${fmt(factor.factor_score)}</small></div>`).join("")}</div>`
+    : "";
+  return `<details class="score-details"><summary>查看评分依据</summary><div class="score-detail-group"><strong>主要加分项</strong><div class="score-factor-list">${factorPills(positive, "positive")}</div></div><div class="score-detail-group"><strong>相对弱项</strong><div class="score-factor-list">${factorPills(negative, "weak")}</div></div>${breakdownMarkup}</details>`;
 }
 
 function fmt(value, digits = 1) {
@@ -620,16 +663,21 @@ async function handleRegister(event) {
 function renderApp() {
   disposeCharts();
   const route = routes[state.route] || routes["/dashboard"];
+  const isAdmin = state.user?.role === "ADMIN";
+  const userName = displayUserName(state.user?.display_name) || state.user?.username || "用户";
+  const avatarText = String(userName).trim().slice(0, 1).toUpperCase() || (isAdmin ? "A" : "U");
+  const visibleGroups = navGroups.filter((group) => !group.adminOnly || isAdmin);
   app.innerHTML = `
     <div class="app-shell">
       <aside class="sidebar">
         <div class="sidebar-brand"><span class="logo-mark">WX</span><div><strong>天气实验室</strong><small>天气数据分析系统</small></div></div>
         <div class="sidebar-rule"></div>
-        <nav>${navGroups.map((group) => `<div class="nav-group"><p>${group.label}</p>${group.items.filter((item) => !item.adminOnly || state.user?.role === "ADMIN").map((item) => `<a href="#${item.path}" class="nav-item ${state.route === item.path ? "active" : ""}" data-route="${item.path}"><span class="nav-icon">${item.icon}</span><span>${item.label}</span>${state.route === item.path ? '<i class="active-line"></i>' : ""}</a>`).join("")}</div>`).join("")}</nav>
+        <div class="sidebar-access ${isAdmin ? "is-admin" : ""}"><span class="access-mark">${isAdmin ? "A" : "U"}</span><div><strong>${isAdmin ? "管理员工作区" : "普通用户工作区"}</strong><small>${isAdmin ? "全部功能：数据 · 推荐 · 分析 · 管理" : "可用：数据查询 · 智能推荐 · 分析洞察"}</small></div></div>
+        <nav>${visibleGroups.map((group) => `<div class="nav-group ${group.adminOnly ? "admin-nav" : ""}"><p><span>${group.label}</span>${group.adminOnly ? '<span class="nav-admin-badge">ADMIN</span>' : ""}</p>${group.items.map((item) => `<a href="#${item.path}" class="nav-item ${state.route === item.path ? "active" : ""}" data-route="${item.path}"><span class="nav-icon">${item.icon}</span><span>${item.label}</span>${group.adminOnly ? '<em class="nav-role-tag">管理员</em>' : ""}${state.route === item.path ? '<i class="active-line"></i>' : ""}</a>`).join("")}</div>`).join("")}${isAdmin ? "" : '<div class="nav-locked"><p><span>管理员功能</span><span class="nav-lock-badge">受限</span></p><div class="nav-locked-item"><span class="nav-icon">🔒</span><span>数据集管理</span></div><div class="nav-locked-item"><span class="nav-icon">🔒</span><span>模型重训</span></div><small>当前账号无权限，请联系管理员开通</small></div>'}</nav>
         <div class="sidebar-bottom"><div class="dataset-status"><span class="status-dot"></span><span>数据服务正常</span></div><small>本地运行 · v1.0</small></div>
       </aside>
       <div class="main-shell">
-        <header class="topbar"><button class="icon-button menu-button" id="menu-toggle" title="打开菜单">☰</button><div class="breadcrumb"><span>天气实验室</span><b>/</b><strong>${route.title}</strong></div><div class="top-actions"><span class="top-date">数据快照 · ${new Date().toLocaleDateString("zh-CN")}</span><div class="user-chip"><span class="avatar">A</span><span><strong>${esc(displayUserName(state.user?.display_name))}</strong><small>${esc(displayRole(state.user?.role))}</small></span></div><button class="logout-button" id="logout-button">退出登录</button></div></header>
+        <header class="topbar"><button class="icon-button menu-button" id="menu-toggle" title="打开菜单">☰</button><div class="breadcrumb"><span>天气实验室</span><b>/</b><strong>${route.title}</strong></div><div class="top-actions"><span class="top-date">数据快照 · ${new Date().toLocaleDateString("zh-CN")}</span><div class="user-chip"><span class="avatar ${isAdmin ? "is-admin" : ""}">${esc(avatarText)}</span><span><strong>${esc(userName)}</strong><small>${esc(displayRole(state.user?.role))}</small></span></div><span class="role-chip ${isAdmin ? "admin" : "user"}">${isAdmin ? "管理员" : "普通用户"}</span><button class="logout-button" id="logout-button">退出登录</button></div></header>
         <main class="page-content"><div id="page-root"></div></main>
       </div>
     </div>`;
@@ -736,12 +784,17 @@ function recommendCompact(items) {
 }
 
 async function loadCities() {
-  const result = await searchCities(state.cityQuery, 100);
-  state.cities = result.items || []; renderCityData();
+  const terms = citySearchTerms(state.cityQuery);
+  const params = new URLSearchParams({ page: String(state.cityPage), size: String(state.cityPageSize) });
+  terms.forEach((term) => params.append("term", term));
+  const result = await api(`/api/cities?${params.toString()}`);
+  state.cities = result.items || [];
+  state.cityTotal = Number(result.total || 0);
+  renderCityData();
 }
 
 function cityTable(items) {
-  const pageSize = 10, start = (state.cityPage - 1) * pageSize, pageItems = items.slice(start, start + pageSize), totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  const pageItems = items, totalPages = Math.max(1, Math.ceil(state.cityTotal / state.cityPageSize));
   if (!pageItems.length) return '<div class="empty-state">没有匹配的城市数据</div>';
   return `<div class="table-wrap"><table><thead><tr><th>国家 / 城市</th><th>当前天气</th><th>温度</th><th>体感</th><th>湿度</th><th>降水</th><th>PM2.5</th><th>能见度</th><th>更新时间</th></tr></thead><tbody>${pageItems.map((item) => `<tr><td><strong>${esc(displayCity(item.city))}</strong><small>${esc(displayCountry(item.country))}</small></td><td><span class="weather-tag">${esc(displayCondition(item.condition))}</span></td><td class="number-cell">${fmt(item.temperature)} °C</td><td class="number-cell">${fmt(item.feels_like)} °C</td><td class="number-cell">${fmt(item.humidity, 0)}%</td><td class="number-cell">${fmt(item.precipitation)} mm</td><td class="number-cell">${fmt(item.pm25)}</td><td class="number-cell">${fmt(item.visibility)} km</td><td class="muted">${dateText(item.updated)}</td></tr>`).join("")}</tbody></table></div><div class="pagination"><span>共 ${fmt(items.length, 0)} 条记录</span><div><button class="page-button" data-page="${state.cityPage - 1}" ${state.cityPage <= 1 ? "disabled" : ""}>上一页</button><b>${state.cityPage} / ${totalPages}</b><button class="page-button" data-page="${state.cityPage + 1}" ${state.cityPage >= totalPages ? "disabled" : ""}>下一页</button></div></div>`;
 }
@@ -749,9 +802,18 @@ function cityTable(items) {
 function renderCityData() {
   const root = document.getElementById("page-root");
   root.innerHTML = `${pageHeader("DATA MANAGEMENT", "城市数据管理", "查询全球城市最新天气观测，快速对比温度、空气质量与环境指标。", '<span class="data-badge">最新城市快照</span>')}<section class="content-card table-card"><div class="filter-bar"><label class="search-field"><span>⌕</span><input id="city-search" value="${esc(state.cityQuery)}" placeholder="输入中文或英文国家、城市名" /></label><button class="primary-button" id="city-search-button">查询数据</button><span class="filter-hint">显示当前数据集中可用城市的最新记录</span></div><div id="city-table">${cityTable(state.cities)}</div></section>`;
+  const totalPages = Math.max(1, Math.ceil(state.cityTotal / state.cityPageSize));
+  const pagination = document.querySelector("#city-table .pagination");
+  if (pagination) {
+    pagination.querySelector("span").textContent = `共 ${fmt(state.cityTotal, 0)} 条记录`;
+    pagination.querySelector("b").textContent = `${state.cityPage} / ${totalPages}`;
+    const [previous, next] = pagination.querySelectorAll(".page-button");
+    previous.disabled = state.cityPage <= 1;
+    next.disabled = state.cityPage >= totalPages;
+  }
   document.getElementById("city-search-button").addEventListener("click", () => { state.cityQuery = document.getElementById("city-search").value.trim(); state.cityPage = 1; loadCities().catch((e) => renderError(e.message)); });
   document.getElementById("city-search").addEventListener("keydown", (event) => { if (event.key === "Enter") document.getElementById("city-search-button").click(); });
-  document.querySelectorAll(".page-button").forEach((button) => button.addEventListener("click", () => { state.cityPage = Number(button.dataset.page); renderCityData(); }));
+  document.querySelectorAll(".page-button").forEach((button) => button.addEventListener("click", () => { state.cityPage = Number(button.dataset.page); loadCities().catch((e) => renderError(e.message)); }));
 }
 
 async function loadDatasets() {
@@ -770,24 +832,35 @@ function renderDatasets(message = "", messageType = "") {
     <section class="dataset-upload content-card">
       <div class="card-heading"><div><p class="kicker">CURRENT DATASET</p><h2>当前生效版本</h2></div><span class="dataset-active-badge">${active ? "正在使用" : "暂无数据"}</span></div>
       ${active ? `<div class="dataset-current"><strong>${esc(active.name || "未命名数据集")}</strong><span>${fmt(active.rowCount, 0)} 条记录</span><span>${fmt(active.fieldCount, 0)} 个字段</span><span>更新于 ${dateText(active.updatedAt)}</span></div>` : '<p class="muted">数据集列表中暂无生效版本。</p>'}
-      <form id="dataset-upload-form" class="dataset-upload-form"><label class="file-picker" for="dataset-file"><span class="file-picker-icon">＋</span><span><strong id="dataset-file-name">选择天气 CSV 文件</strong><small>仅支持 .csv 格式</small></span></label><input id="dataset-file" name="file" type="file" accept=".csv,text/csv" required /><button class="primary-button" id="dataset-upload-button" type="submit">上传并启用</button></form>
-      <p class="dataset-upload-note">上传前请确认 CSV 包含系统要求的天气字段。新数据集启用后，仪表盘、城市查询和分析结果将使用新数据。</p>
+      <form id="dataset-upload-form" class="dataset-upload-form"><label class="file-picker" for="dataset-file"><span class="file-picker-icon">＋</span><span><strong id="dataset-file-name">选择天气 CSV 文件</strong><small>仅支持 .csv 格式</small></span></label><input id="dataset-file" name="file" type="file" accept=".csv,text/csv" required /><button class="primary-button" id="dataset-upload-button" type="submit">上传并校验</button></form>
+      <p class="dataset-upload-note">上传后先预览记录数量、重复项、拒绝项和缺失值；确认启用后，仪表盘、城市查询和分析结果才会切换到新数据。</p>
       <div id="dataset-upload-message" class="dataset-message ${messageType}">${esc(message)}</div>
+      ${state.datasetPreview ? `<div class="dataset-preview-box"><div class="card-heading"><div><p class="kicker">VALIDATION PREVIEW</p><h3>待启用版本校验结果</h3></div><span class="dataset-status-tag preview">待确认</span></div><p class="dataset-preview-name">${esc(state.datasetPreview.name || "未命名数据集")}</p><div class="dataset-preview-grid"><span>原始记录 <b>${fmt(state.datasetPreviewValidation?.rows_before, 0)}</b></span><span>有效记录 <b>${fmt(state.datasetPreviewValidation?.valid_rows, 0)}</b></span><span>重复记录 <b>${fmt(state.datasetPreviewValidation?.duplicate_rows, 0)}</b></span><span>拒绝记录 <b>${fmt(state.datasetPreviewValidation?.rejected_rows, 0)}</b></span><span>缺失单元格 <b>${fmt(state.datasetPreviewValidation?.missing_cells, 0)}</b></span><span>字段数 <b>${fmt(state.datasetPreviewValidation?.fields, 0)}</b></span></div><p class="dataset-preview-note">当前运行数据保持不变。确认启用后，系统才会归档旧版本并切换查询、分析与推荐数据。</p><div class="dataset-preview-actions"><button class="primary-button" id="dataset-activate-button" type="button" ${state.datasetActivating ? "disabled" : ""}>${state.datasetActivating ? "正在启用..." : "确认启用此版本"}</button><button class="secondary-button" id="dataset-cancel-preview-button" type="button" ${state.datasetActivating ? "disabled" : ""}>取消预览</button></div></div>` : ""}
     </section>
     <section class="content-card dataset-list-card"><div class="card-heading"><div><p class="kicker">DATASET HISTORY</p><h2>数据版本记录</h2></div><button class="secondary-button" id="dataset-refresh-button" title="刷新数据列表">↻ 刷新</button></div>
-      ${state.datasets.length ? `<div class="table-wrap"><table class="dataset-table"><thead><tr><th>数据集文件</th><th>数据规模</th><th>状态</th><th>创建时间</th><th>最近更新</th></tr></thead><tbody>${state.datasets.map((item) => `<tr><td><strong>${esc(item.name || "未命名")}</strong><small>${esc(item.description || "天气数据集")}</small></td><td class="number-cell">${fmt(item.rowCount, 0)} 条 / ${fmt(item.fieldCount, 0)} 字段</td><td><span class="dataset-status-tag ${String(item.status).toLowerCase()}">${datasetStatusText(item.status)}</span></td><td class="muted">${dateText(item.createdAt)}</td><td class="muted">${dateText(item.updatedAt)}</td></tr>`).join("")}</tbody></table></div><div class="pagination"><span>共 ${fmt(state.datasetTotal, 0)} 个数据版本</span><div><button class="page-button" id="dataset-prev" ${state.datasetPage <= 1 ? "disabled" : ""}>上一页</button><b>${state.datasetPage} / ${totalPages}</b><button class="page-button" id="dataset-next" ${state.datasetPage >= totalPages ? "disabled" : ""}>下一页</button></div></div>` : '<div class="empty-state">暂无数据版本记录</div>'}
+      ${state.datasets.length ? `<div class="table-wrap"><table class="dataset-table"><thead><tr><th>数据集文件</th><th>数据规模</th><th>状态</th><th>创建时间</th><th>最近更新</th><th>操作</th></tr></thead><tbody>${state.datasets.map((item) => `<tr><td><strong>${esc(item.name || "未命名")}</strong><small>${esc(item.description || "天气数据集")}</small></td><td class="number-cell">${fmt(item.rowCount, 0)} 条 / ${fmt(item.fieldCount, 0)} 字段</td><td><span class="dataset-status-tag ${String(item.status).toLowerCase()}">${datasetStatusText(item.status)}</span></td><td class="muted">${dateText(item.createdAt)}</td><td class="muted">${dateText(item.updatedAt)}</td><td class="dataset-actions">${item.status === "PREVIEW" ? `<button class="dataset-action activate" data-dataset-activate="${item.id}" ${state.datasetActivating ? "disabled" : ""}>启用</button><button class="dataset-action cancel" data-dataset-cancel="${item.id}" ${state.datasetActivating ? "disabled" : ""}>取消</button>` : item.status === "ACTIVE" ? '<span class="muted">当前版本</span>' : '<span class="muted">—</span>'}</td></tr>`).join("")}</tbody></table></div><div class="pagination"><span>共 ${fmt(state.datasetTotal, 0)} 个数据版本</span><div><button class="page-button" id="dataset-prev" ${state.datasetPage <= 1 ? "disabled" : ""}>上一页</button><b>${state.datasetPage} / ${totalPages}</b><button class="page-button" id="dataset-next" ${state.datasetPage >= totalPages ? "disabled" : ""}>下一页</button></div></div>` : '<div class="empty-state">暂无数据版本记录</div>'}
     </section>`;
   document.getElementById("dataset-file").addEventListener("change", (event) => {
     document.getElementById("dataset-file-name").textContent = event.target.files[0]?.name || "选择天气 CSV 文件";
   });
   document.getElementById("dataset-upload-form").addEventListener("submit", uploadDataset);
+  document.getElementById("dataset-activate-button")?.addEventListener("click", () => activateDataset().catch((error) => renderDatasets(error.message, "error")));
+  document.getElementById("dataset-cancel-preview-button")?.addEventListener("click", () => cancelDatasetPreview().catch((error) => renderDatasets(error.message, "error")));
+  document.querySelectorAll("[data-dataset-activate]").forEach((button) => button.addEventListener("click", () => {
+    const item = state.datasets.find((candidate) => String(candidate.id) === button.dataset.datasetActivate);
+    activateDataset(item).catch((error) => renderDatasets(error.message, "error"));
+  }));
+  document.querySelectorAll("[data-dataset-cancel]").forEach((button) => button.addEventListener("click", () => {
+    const item = state.datasets.find((candidate) => String(candidate.id) === button.dataset.datasetCancel);
+    cancelDatasetPreview(item).catch((error) => renderDatasets(error.message, "error"));
+  }));
   document.getElementById("dataset-refresh-button").addEventListener("click", () => loadDatasets().catch((error) => renderError(error.message)));
   document.getElementById("dataset-prev")?.addEventListener("click", () => { state.datasetPage--; loadDatasets().catch((error) => renderError(error.message)); });
   document.getElementById("dataset-next")?.addEventListener("click", () => { state.datasetPage++; loadDatasets().catch((error) => renderError(error.message)); });
 }
 
 function datasetStatusText(status) {
-  return ({ ACTIVE: "当前使用", ARCHIVED: "已归档", REGISTERED: "已登记" })[status] || status || "未知";
+  return ({ ACTIVE: "当前使用", ARCHIVED: "已归档", PREVIEW: "待确认", REGISTERED: "已登记" })[status] || status || "未知";
 }
 
 async function uploadDataset(event) {
@@ -806,14 +879,14 @@ async function uploadDataset(event) {
   try {
     const formData = new FormData();
     formData.append("file", file);
-    const response = await fetch("/api/datasets/upload", { method: "POST", body: formData });
+    const response = await fetch("/api/datasets/preview", { method: "POST", body: formData });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(displayErrorMessage(result.message || result.error || `上传失败（${response.status}）`));
+    state.datasetPreview = result.item || null;
+    state.datasetPreviewValidation = result.validation || null;
     state.datasetPage = 1;
-    state.summary = null;
-    state.cleaning = null;
     await loadDatasets();
-    renderDatasets(`已启用 ${result.item?.name || file.name}，共 ${fmt(result.item?.rowCount, 0)} 条记录、${fmt(result.item?.fieldCount, 0)} 个字段。`, "success");
+    renderDatasets(`已校验 ${result.item?.name || file.name}，请检查预览后确认启用。`, "success");
   } catch (error) {
     renderDatasets(error.message || "上传失败，请检查 CSV 文件后重试。", "error");
   } finally {
@@ -821,13 +894,47 @@ async function uploadDataset(event) {
   }
 }
 
+async function activateDataset(item = state.datasetPreview) {
+  if (!item) return;
+  state.datasetActivating = true;
+  renderDatasets("正在启用新版本，请稍候...", "success");
+  try {
+    const result = await api(`/api/datasets/${item.id}/activate`, { method: "POST" });
+    state.datasetPreview = null;
+    state.datasetPreviewValidation = null;
+    state.datasetActivating = false;
+    state.summary = null;
+    state.cleaning = null;
+    state.planItems = null;
+    state.recommendWeights = [];
+    state.planWeights = [];
+    await loadDatasets();
+    renderDatasets(result.message || "数据集已启用。", "success");
+  } catch (error) {
+    state.datasetActivating = false;
+    throw error;
+  }
+}
+
+async function cancelDatasetPreview(item = state.datasetPreview) {
+  if (!item) return;
+  await api(`/api/datasets/${item.id}`, { method: "DELETE" });
+  if (!state.datasetPreview || String(state.datasetPreview.id) === String(item.id)) {
+    state.datasetPreview = null;
+    state.datasetPreviewValidation = null;
+  }
+  await loadDatasets();
+  renderDatasets("已取消待启用预览版本。", "success");
+}
+
 async function loadRecommend() {
-  try { const result = await searchRecommendations(state.recommendQuery, state.recommendMode, 30); state.recommend = result.items || []; renderRecommend(); translateRecommendData(); } catch (error) { renderError(error.message); }
+  try { const result = await searchRecommendations(state.recommendQuery, state.recommendMode, 30); state.recommend = result.items || []; state.recommendWeights = result.weights || []; renderRecommend(); translateRecommendData(); } catch (error) { renderError(error.message); }
 }
 
 function renderRecommend() {
   const modes = { comfort: "综合舒适", clean_air: "清新空气", warm_sunny: "温暖晴朗", cool_escape: "清凉避暑" };
   document.getElementById("page-root").innerHTML = `${pageHeader("INTELLIGENT RECOMMENDATION", "出行推荐中心", "基于温度、湿度、降水、能见度和空气质量的规则评分，为出行筛选城市。", '<span class="rule-badge">规则评分 · 非天气预报</span>')}<section class="content-card recommend-card"><div class="recommend-toolbar"><div class="segmented-control">${Object.entries(modes).map(([value, label]) => `<button class="segment ${state.recommendMode === value ? "active" : ""}" data-mode="${value}">${label}</button>`).join("")}</div><label class="search-field recommend-search"><span>⌕</span><input id="recommend-search" value="${esc(state.recommendQuery)}" placeholder="输入中文或英文国家、城市名" /></label><button class="secondary-button" id="recommend-search-button">筛选</button></div><div class="recommend-grid">${state.recommend.length ? state.recommend.map((item, index) => `<article class="recommend-card-item"><div class="recommend-number">${String(index + 1).padStart(2, "0")}</div><div class="recommend-main"><div class="recommend-title"><div><p>${esc(item.country)}</p><h3>${esc(item.city)}</h3></div><strong>${fmt(item.score)}<small> / 100</small></strong></div><div class="recommend-meta"><span>${esc(item.condition)}</span><span>${fmt(item.temperature)}°C</span><span>PM2.5 ${fmt(item.pm25)}</span></div><p class="recommend-reason">推荐理由：${esc(item.reason)}</p></div></article>`).join("") : '<div class="empty-state">没有匹配的推荐城市</div>'}</div></section>`;
+  document.querySelector(".recommend-toolbar")?.insertAdjacentHTML("afterend", renderStrategyWeights(state.recommendWeights));
   document.querySelectorAll(".segment").forEach((button) => button.addEventListener("click", () => { state.recommendMode = button.dataset.mode; loadRecommend(); }));
   document.getElementById("recommend-search-button").addEventListener("click", () => { state.recommendQuery = document.getElementById("recommend-search").value.trim(); loadRecommend(); });
   document.getElementById("recommend-search").addEventListener("keydown", (event) => { if (event.key === "Enter") document.getElementById("recommend-search-button").click(); });
@@ -845,6 +952,7 @@ function translateRecommendData() {
     if (city) city.textContent = displayCity(item.city);
     if (condition) condition.textContent = displayCondition(item.condition);
     if (reason) reason.textContent = `推荐理由：${item.reason}`;
+    card.querySelector(".recommend-main")?.insertAdjacentHTML("beforeend", renderScoreDetails(item));
   });
 }
 
@@ -924,8 +1032,8 @@ function renderPlan() {
   const months = Array.from({ length: 12 }, (_, index) => index + 1);
   const modes = { comfort: "综合舒适", clean_air: "清新空气", warm_sunny: "温暖晴朗", cool_escape: "清凉避暑" };
   document.getElementById("page-root").innerHTML = `${pageHeader("TRAVEL PLANNER", "出行规划", "选择出行月份，系统用各城市历史同月的均温、湿度、降水与空气质量进行规则评分，回答“这个月去哪里最舒服”。", '<span class="rule-badge">历史同期均值 · 非天气预报</span>')}<section class="content-card"><div class="recommend-toolbar"><div class="segmented-control">${months.map((month) => `<button class="segment ${state.planMonth === month ? "active" : ""}" data-month="${month}">${month}月</button>`).join("")}</div></div><div class="recommend-toolbar"><div class="segmented-control">${Object.entries(modes).map(([value, label]) => `<button class="segment ${state.planMode === value ? "active" : ""}" data-mode="${value}">${label}</button>`).join("")}</div></div></section><div id="plan-result"></div>`;
-  document.querySelectorAll("[data-month]").forEach((button) => button.addEventListener("click", () => { state.planMonth = Number(button.dataset.month); renderPlan(); loadPlan(); }));
-  document.querySelectorAll("[data-mode]").forEach((button) => button.addEventListener("click", () => { state.planMode = button.dataset.mode; renderPlan(); loadPlan(); }));
+  document.querySelectorAll("[data-month]").forEach((button) => button.addEventListener("click", () => { state.planMonth = Number(button.dataset.month); state.planItems = null; state.planWeights = []; renderPlan(); loadPlan(); }));
+  document.querySelectorAll("[data-mode]").forEach((button) => button.addEventListener("click", () => { state.planMode = button.dataset.mode; state.planItems = null; state.planWeights = []; renderPlan(); loadPlan(); }));
   if (state.planItems) renderPlanResult(); else loadPlan();
 }
 
@@ -936,6 +1044,7 @@ async function loadPlan() {
   try {
     const result = await api(`/api/plan?month=${state.planMonth}&mode=${state.planMode}&limit=8`);
     state.planItems = result.items || [];
+    state.planWeights = result.weights || [];
     renderPlanResult();
   } catch (error) { box.innerHTML = `<div class="error-panel"><strong>加载失败</strong><p>${esc(error.message)}</p></div>`; }
 }
@@ -945,6 +1054,13 @@ function renderPlanResult() {
   if (!box) return;
   const items = state.planItems || [];
   box.innerHTML = `<section class="content-card recommend-card"><div class="card-heading"><div><p class="kicker">${state.planMonth}月 · ${ { comfort: "综合舒适", clean_air: "清新空气", warm_sunny: "温暖晴朗", cool_escape: "清凉避暑" }[state.planMode] }</p><h2>推荐出行城市</h2></div><span class="muted">基于 ${dateText(state.summary?.time_start)} 至 ${dateText(state.summary?.time_end)} 的历史同期观测</span></div><div class="recommend-grid">${items.length ? items.map((item, index) => `<article class="recommend-card-item"><div class="recommend-number">${String(index + 1).padStart(2, "0")}</div><div class="recommend-main"><div class="recommend-title"><div><p>${esc(displayCountry(item.country))}</p><h3>${esc(displayCity(item.city))}</h3></div><strong>${fmt(item.score)}<small> / 100</small></strong></div><div class="recommend-meta"><span>均温 ${fmt(item.temperature)}°C</span><span>湿度 ${fmt(item.humidity, 0)}%</span><span>降水 ${fmt(item.precipitation)}mm</span><span>PM2.5 ${fmt(item.pm25)}</span></div><p class="recommend-reason">推荐理由：${esc(item.reason)}</p></div></article>`).join("") : '<div class="empty-state">没有匹配的推荐城市</div>'}</div></section>`;
+  box.querySelector(".card-heading")?.insertAdjacentHTML("afterend", renderStrategyWeights(state.planWeights));
+  box.querySelectorAll(".recommend-card-item").forEach((card, index) => {
+    const item = items[index];
+    if (!item) return;
+    card.querySelector(".recommend-meta")?.insertAdjacentHTML("afterbegin", `<span>历史样本 ${fmt(item.sample_count, 0)} 条</span>`);
+    card.querySelector(".recommend-main")?.insertAdjacentHTML("beforeend", renderScoreDetails(item));
+  });
 }
 
 // ---------------- 城市对比（逐月曲线 + 指标雷达 + 趋势外推） ----------------
@@ -1012,7 +1128,7 @@ function renderCompareResult() {
   const metrics = [
     ["温度", "temperature", "°C"], ["体感", "feels_like", "°C"], ["湿度", "humidity", "%"],
     ["降水", "precipitation", "mm"], ["风速", "wind", "kph"], ["能见度", "visibility", "km"],
-    ["紫外线", "uv", ""], ["PM2.5", "pm25", ""], ["降水概率(模型)", "rain_probability", "%"],
+    ["紫外线", "uv", ""], ["PM2.5", "pm25", ""], ["降水概率(历史频率)", "rain_probability", "%"],
   ];
   container.innerHTML = `
     <div class="dashboard-grid"><section class="content-card"><div class="card-heading"><div><p class="kicker">MONTHLY PROFILE</p><h2>逐月平均气温对比</h2></div></div><div id="compare-months" class="echart-box"></div></section>
@@ -1268,7 +1384,8 @@ async function loadMlResult() {
   try {
     const result = await api("/api/ml");
     if (!result.available) {
-      root.innerHTML = `<div class="error-panel"><strong>实验结果尚未生成</strong><p>${esc(displayErrorMessage(result.message))}</p></div>`;
+      root.innerHTML = `<div class="error-panel"><strong>实验结果尚未生成</strong><p>${esc(displayErrorMessage(result.message))}</p></div>${mlTrainingPanel()}`;
+      initializeMlTrainingControls();
       return;
     }
     renderMlResult(result.metrics);
@@ -1279,7 +1396,12 @@ function renderMlResult(m) {
   const root = document.getElementById("ml-root");
   const bestKey = (m.best_model || "").trim();
   const bestName = displayModelName(bestKey);
+  const modelDataNotice = m.model_data_status && m.model_data_status !== "current"
+    ? `<div class="notice-panel warning-panel" style="margin-bottom:18px"><div><p class="kicker">MODEL DATA VERSION</p><strong>${esc(m.model_data_message || "模型与当前数据集版本不一致")}</strong><span>请重新训练模型后再使用降水预测。</span></div></div>`
+    : "";
   root.innerHTML = `
+    ${mlTrainingPanel()}
+    ${modelDataNotice}
     <div class="dashboard-grid">
       <section class="content-card"><div class="card-heading"><div><p class="kicker">LIVE INFERENCE</p><h2>实时降水概率预测器</h2></div><span class="muted" id="ml-mode-hint">正在加载...</span></div><div id="ml-gauge" style="height:200px"></div><div class="filter-bar" style="margin-top:6px"><label class="search-field"><span>⌕</span><input id="ml-city-search" placeholder="搜索城市读取最新观测" /></label><button class="primary-button" id="ml-city-search-button">读取</button></div><div id="ml-city-chips" class="chip-row"></div><div id="ml-drivers" class="chip-row"></div></section>
       <section class="content-card"><div class="card-heading"><div><p class="kicker">MANUAL INPUT</p><h2>手动参数预测</h2></div><span class="muted">拖动滑块实时调用模型</span></div><div id="ml-sliders"></div></section>
@@ -1294,9 +1416,80 @@ function renderMlResult(m) {
     <section class="content-card"><div class="card-heading"><div><p class="kicker">MODEL COMPARISON</p><h2>八种算法性能对比</h2></div><span class="muted">测试集 ${fmt(m.test, 0)} 条 · 悬停查看数值</span></div><div id="ml-compare" class="echart-box" style="height:320px"></div></section>
     <section class="content-card" style="margin-top:18px"><div class="card-heading"><div><p class="kicker">EVALUATION TABLE</p><h2>评估指标明细</h2></div><span class="muted">最佳模型按 F1 选取：${esc(bestName)}</span></div><div class="table-wrap"><table><thead><tr><th>算法</th><th>准确率</th><th>精确率</th><th>召回率</th><th>F1</th><th>AUC</th><th>训练耗时</th></tr></thead><tbody>${m.models.map((item) => { const isBest = normalizeLookup(displayModelName(item.name)) === normalizeLookup(bestName); return `<tr class="${isBest ? "best-row" : ""}"><td><strong>${esc(displayModelName(item.name))}</strong>${isBest ? ' <span class="quality-badge" style="margin-left:6px">最佳</span>' : ""}</td><td class="number-cell">${item.accuracy.toFixed(4)}</td><td class="number-cell">${item.precision.toFixed(4)}</td><td class="number-cell">${item.recall.toFixed(4)}</td><td class="number-cell">${item.f1.toFixed(4)}</td><td class="number-cell">${item.auc.toFixed(4)}</td><td class="number-cell">${item.train_seconds}s</td></tr>`; }).join("")}</tbody></table></div></section>
     <section class="content-card" style="margin-top:18px"><div class="card-heading"><div><p class="kicker">VISUALIZATIONS</p><h2>训练与评估可视化</h2></div><span class="muted">由 algorithm/ml_train.py 生成</span></div><div class="eda-grid" style="grid-template-columns:repeat(2,minmax(0,1fr))"><figure class="eda-card"><a href="/figures/ml_roc_curves.png" target="_blank"><img src="/figures/ml_roc_curves.png" alt="ROC 曲线" loading="lazy" /></a><figcaption><strong>ROC 曲线对比</strong><span>八种算法的受试者工作特征曲线与 AUC</span></figcaption></figure><figure class="eda-card"><a href="/figures/ml_confusion_matrix.png" target="_blank"><img src="/figures/ml_confusion_matrix.png" alt="混淆矩阵" loading="lazy" /></a><figcaption><strong>最佳模型混淆矩阵</strong><span>真负例 / 假正例 / 假负例 / 真正例</span></figcaption></figure><figure class="eda-card"><a href="/figures/ml_feature_importance.png" target="_blank"><img src="/figures/ml_feature_importance.png" alt="特征重要性" loading="lazy" /></a><figcaption><strong>特征重要性 Top10</strong><span>随机森林与 LightGBM 的对比</span></figcaption></figure><figure class="eda-card"><a href="/figures/ml_class_balance.png" target="_blank"><img src="/figures/ml_class_balance.png" alt="类别分布" loading="lazy" /></a><figcaption><strong>降水标签类别分布</strong><span>类别不平衡是召回率偏低的主要原因</span></figcaption></figure></div></section>
-    <section class="notice-panel" style="margin-top:18px"><div><p class="kicker">REPRODUCE</p><strong>重新训练实验</strong><span>在项目根目录执行 python algorithm/ml_train.py，结果与图表自动更新；完整分析见 data/profile/ML_REPORT.md</span></div></section>`;
+    <section class="notice-panel" style="margin-top:18px"><div><p class="kicker">REPRODUCE</p><strong>实验报告</strong><span>完整分析见 data/profile/ML_REPORT.md；更换数据集后请重新训练并确认模型版本与当前数据一致。</span></div></section>`;
   mountMlChart(m);
-  mountMlPredictor();
+  mountMlPredictor(m.model_data_status === "current", m.model_data_message);
+  initializeMlTrainingControls();
+}
+
+function mlTrainingPanel() {
+  if (state.user?.role !== "ADMIN") {
+    return `<section class="notice-panel permission-hint" style="margin-bottom:18px"><div><p class="kicker">MODEL MANAGEMENT</p><strong>模型训练 · 管理员专属</strong><span>当前为普通用户，仅可查看算法实验结果；重新训练模型需要管理员权限。</span></div><span class="role-chip user">只读</span></section>`;
+  }
+  return `<section class="notice-panel" id="ml-training-panel" style="margin-bottom:18px"><div><p class="kicker">MODEL MANAGEMENT</p><strong>模型训练</strong><span id="ml-training-status">使用当前激活数据集重新训练降水模型</span></div><button class="secondary-button" id="ml-train-button">重新训练模型</button></section>`;
+}
+
+function initializeMlTrainingControls() {
+  const button = document.getElementById("ml-train-button");
+  if (button) button.addEventListener("click", startMlTraining);
+  restoreMlTrainingTask();
+}
+
+function setMlTrainingStatus(message, running = false) {
+  const status = document.getElementById("ml-training-status");
+  const button = document.getElementById("ml-train-button");
+  if (status) status.textContent = message;
+  if (button) {
+    button.disabled = running;
+    button.textContent = running ? "训练中..." : "重新训练模型";
+  }
+}
+
+async function startMlTraining() {
+  setMlTrainingStatus("正在创建训练任务...", true);
+  try {
+    const result = await api("/api/models/train", { method: "POST" });
+    state.mlTrainingTaskId = result.taskId;
+    setMlTrainingStatus("训练任务已启动，正在使用当前激活的数据集...", true);
+    pollMlTrainingTask();
+  } catch (error) {
+    setMlTrainingStatus(`启动失败：${error.message}`);
+  }
+}
+
+async function restoreMlTrainingTask() {
+  if (state.user?.role !== "ADMIN" || state.route !== "/ml" || state.mlTrainingTaskId) return;
+  try {
+    const result = await api("/api/models?page=1&size=1");
+    const task = result.items?.[0];
+    if (task?.status === "RUNNING") {
+      state.mlTrainingTaskId = task.id;
+      setMlTrainingStatus("检测到正在运行的训练任务...", true);
+      pollMlTrainingTask();
+    }
+  } catch (_) { /* 模型管理入口仅对管理员可用 */ }
+}
+
+async function pollMlTrainingTask() {
+  if (!state.mlTrainingTaskId) return;
+  try {
+    const result = await api(`/api/models/${state.mlTrainingTaskId}/status`);
+    if (result.running || result.status === "RUNNING") {
+      setMlTrainingStatus("模型正在训练，完成后页面会自动刷新结果。", true);
+      state.mlTrainingTimer = setTimeout(pollMlTrainingTask, 2000);
+      return;
+    }
+    const completed = result.status === "SUCCEEDED";
+    setMlTrainingStatus(completed ? "训练完成，正在刷新模型评估结果..." : `训练失败：${String(result.log || "请检查训练日志").slice(-400)}`);
+    state.mlTrainingTaskId = null;
+    if (completed) {
+      await loadMlResult();
+      setMlTrainingStatus("训练完成，模型已更新。");
+    }
+  } catch (error) {
+    setMlTrainingStatus(`读取训练状态失败：${error.message}`);
+    state.mlTrainingTaskId = null;
+  }
 }
 
 // ---- 模型在线推理：城市预测 / 手动滑块 / 风险榜 ----
@@ -1312,7 +1505,7 @@ const mlSliders = [
   ["pm25", "PM2.5", 0, 150, 1],
 ];
 
-function mountMlPredictor() {
+function mountMlPredictor(modelCurrent = true, modelMessage = "") {
   mountChart("ml-gauge", {
     series: [{
       type: "gauge", min: 0, max: 100, startAngle: 200, endAngle: -20, radius: "95%",
@@ -1326,6 +1519,16 @@ function mountMlPredictor() {
     }],
   });
   renderMlSliders(null);
+  if (!modelCurrent) {
+    const message = modelMessage || "模型与当前数据集版本不一致，请先重新训练";
+    document.querySelectorAll("[data-ml-slider], #ml-city-search, #ml-city-search-button").forEach((element) => { element.disabled = true; });
+    const hint = document.getElementById("ml-mode-hint");
+    if (hint) hint.textContent = message;
+    document.getElementById("ml-drivers").textContent = message;
+    document.getElementById("ml-risk-model").textContent = message;
+    document.getElementById("ml-risk-list").textContent = message;
+    return;
+  }
   document.getElementById("ml-city-search-button").addEventListener("click", searchMlCities);
   document.getElementById("ml-city-search").addEventListener("keydown", (event) => { if (event.key === "Enter") searchMlCities(); });
   loadMlRisk();
@@ -1423,7 +1626,7 @@ async function loadMlRisk() {
 
 function renderAdvice() {
   const months = Array.from({ length: 12 }, (_, index) => index + 1);
-  document.getElementById("page-root").innerHTML = `${pageHeader("TRAVEL ASSISTANT", "出行助手", "选择城市与出行时间，系统综合实况/历史同期气候、机器学习降水概率与空气质量，生成六项生活指数和出行建议。", '<span class="rule-badge">数据驱动 · 非天气预报</span>')}<section class="content-card"><div class="filter-bar"><label class="search-field"><span>⌕</span><input id="advice-search" value="${esc(state.adviceQuery)}" placeholder="搜索城市，如 Beijing / Paris / 中国" /></label><button class="primary-button" id="advice-search-button">查询</button><span class="filter-hint">当前城市：${esc(displayCity((state.adviceCity || "China | Beijing").split(" | ")[1]))}</span></div><div class="chip-row" id="advice-chips"></div><div class="recommend-toolbar" style="margin-top:10px"><div class="segmented-control"><button class="segment ${state.adviceMonth === null ? "active" : ""}" data-amonth="">当前实况</button>${months.map((month) => `<button class="segment ${state.adviceMonth === month ? "active" : ""}" data-amonth="${month}">${month}月</button>`).join("")}</div></div></section><div id="advice-result"></div>`;
+  document.getElementById("page-root").innerHTML = `${pageHeader("TRAVEL ASSISTANT", "出行助手", "选择城市与出行时间，系统综合实况/历史同期气候、历史降水频率与空气质量，生成六项生活指数和出行建议。", '<span class="rule-badge">数据驱动 · 非天气预报</span>')}<section class="content-card"><div class="filter-bar"><label class="search-field"><span>⌕</span><input id="advice-search" value="${esc(state.adviceQuery)}" placeholder="搜索城市，如 Beijing / Paris / 中国" /></label><button class="primary-button" id="advice-search-button">查询</button><span class="filter-hint">当前城市：${esc(displayCity((state.adviceCity || "China | Beijing").split(" | ")[1]))}</span></div><div class="chip-row" id="advice-chips"></div><div class="recommend-toolbar" style="margin-top:10px"><div class="segmented-control"><button class="segment ${state.adviceMonth === null ? "active" : ""}" data-amonth="">当前实况</button>${months.map((month) => `<button class="segment ${state.adviceMonth === month ? "active" : ""}" data-amonth="${month}">${month}月</button>`).join("")}</div></div></section><div id="advice-result"></div>`;
   document.getElementById("advice-search-button").addEventListener("click", searchAdviceCities);
   document.getElementById("advice-search").addEventListener("keydown", (event) => { if (event.key === "Enter") searchAdviceCities(); });
   document.querySelectorAll("[data-amonth]").forEach((button) => button.addEventListener("click", () => {
@@ -1475,7 +1678,7 @@ function renderAdviceResult() {
     [`降水 ${fmt(data.facts.precipitation)}mm`],
     [`PM2.5 ${fmt(data.facts.pm25)}`],
     [`紫外线 ${fmt(data.facts.uv)}`],
-    [`${data.mode === "now" ? "实时" : "历史同期"}降水概率 ${fmt(data.facts.rain_probability)}%`],
+    [`${data.facts.rain_probability_label || (data.mode === "now" ? "历史记录降水频率" : "历史同期降水频率")} ${fmt(data.facts.rain_probability)}%`],
   ];
   if (data.facts.condition) facts.push([`实况：${displayCondition(data.facts.condition)}`]);
   if (data.facts.deviation !== null && data.facts.deviation !== undefined && Math.abs(data.facts.deviation) >= 1.5) {
@@ -1483,7 +1686,7 @@ function renderAdviceResult() {
   }
   box.innerHTML = `
     <div class="dashboard-grid">
-      <section class="content-card"><div class="card-heading"><div><p class="kicker">OVERALL SCORE</p><h2>综合出行评分</h2></div><span class="muted">${esc(data.mode === "now" ? "当前实况 + 实时模型" : `${data.month} 月历史同期`)}</span></div><div id="advice-gauge" style="height:200px"></div><div class="chip-row">${facts.map(([text]) => `<span class="chip active">${esc(text)}</span>`).join("")}</div></section>
+      <section class="content-card"><div class="card-heading"><div><p class="kicker">OVERALL SCORE</p><h2>综合出行评分</h2></div><span class="muted">${esc(data.context_label || (data.mode === "now" ? "当前实况 + 历史降水统计" : `${data.month} 月历史同期`))}</span></div><div id="advice-gauge" style="height:200px"></div><div class="chip-row">${facts.map(([text]) => `<span class="chip active">${esc(text)}</span>`).join("")}</div></section>
       <section class="content-card"><div class="card-heading"><div><p class="kicker">MONTHLY CONTEXT</p><h2>全年逐月均温</h2></div><span class="muted">红色为${data.mode === "now" ? "当前" : "所选"}月份</span></div><div id="advice-months" style="height:200px"></div></section>
     </div>
     <section class="content-card" style="margin-top:18px"><div class="card-heading"><div><p class="kicker">LIFE INDICES</p><h2>六项生活指数</h2></div><span class="muted">${esc(displayCity(data.city))} · ${esc(displayCountry(data.country))}</span></div><div class="advice-grid">${data.indices.map((item) => `<div class="advice-index"><span class="name">${esc(item.name)}</span><b class="level tone-${item.tone}">${esc(item.level)}</b><p>${esc(item.text)}</p></div>`).join("")}</div><div class="quality-note" style="margin-top:14px"><strong>出行建议</strong><p>${esc(data.summary)}</p></div></section>`;
@@ -1540,24 +1743,27 @@ function renderQuality() {
   const s = state.summary || {};
   const c = state.cleaning || {};
   const rules = Object.entries(s.quality_rules || {}).map(([label, value]) => [displayQualityRule(label), value]);
-  const qualityBadge = `<span class="quality-badge">${rules.filter(([, value]) => value > 0).length ? "存在待复核项" : "检查通过"}</span>`;
+  const missingCells = Number(s.missing_values ?? c.missing_cells ?? 0);
+  const qualityIssues = rules.some(([, value]) => value > 0) || missingCells > 0 || Number(c.invalid_rows) > 0 || Number(c.duplicate_rows) > 0;
+  const qualityBadge = `<span class="quality-badge">${qualityIssues ? "存在待复核项" : "检查通过"}</span>`;
   const cleaningStats = [
-    ["清洗前行数", fmt(c.rows_before, 0)],
-    ["清洗后行数", fmt(c.rows_after, 0)],
-    ["剔除位置错乱行", fmt(c.mismatch_removed, 0)],
-    ["剔除垃圾行（人工复核）", fmt(c.junk_removed, 0)],
-    ["国家名拼写归并", `${fmt(c.country_rename_count, 0)} 项`],
-    ["城市拼写归并", `${fmt(c.label_merge_count, 0)} 组`],
+    ["CSV 数据行", fmt(c.rows_before, 0)],
+    ["保留记录数", fmt(c.rows_after, 0)],
+    ["无效位置行", fmt(c.invalid_location_rows, 0)],
+    ["格式错误行", fmt(c.malformed_rows, 0)],
+    ["重复行", fmt(c.duplicate_rows, 0)],
+    ["缺失单元格", fmt(c.missing_cells, 0)],
     ["城市数", `${fmt(c.cities_before, 0)} → ${fmt(c.cities_after, 0)}`],
     ["国家数", `${fmt(c.countries_before, 0)} → ${fmt(c.countries_after, 0)}`],
   ];
   const detail = c.detail || {};
-  const cleaningCard = `<section class="content-card"><div class="card-heading"><div><p class="kicker">CLEANING REPORT</p><h2>数据清洗报告</h2></div><span class="muted">仅修正身份字段，不改动气象数值</span></div><div class="profile-list">${cleaningStats.map(([label, value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join("")}</div><div class="quality-note"><strong>剔除的位置错乱组（同名城市坐标远离主位置）</strong><p>${esc((detail.dropped_mismatch || []).join("；")) || "无"}</p><strong>人工复核确认的垃圾城市</strong><p>${esc((detail.dropped_junk_keys || []).join("；")) || "无"}</p></div></section>`;
-  document.getElementById("page-root").innerHTML = `${pageHeader("DATA QUALITY", "数据质量检查", "把模型训练和推荐使用前需要关注的边界规则集中展示，便于后续更换数据集时复用。", qualityBadge)}<div class="quality-grid"><section class="content-card"><div class="card-heading"><div><p class="kicker">VALIDATION RULES</p><h2>字段边界检查</h2></div></div><div class="quality-table">${rules.map(([label, value]) => `<div class="quality-check"><span class="check-icon ${value > 0 ? "issue" : "pass"}">${value > 0 ? "!" : "✓"}</span><div><strong>${esc(label)}</strong><small>${value > 0 ? "检测到异常记录，建议复核来源或清洗规则" : "未检测到越界记录"}</small></div><b class="${value > 0 ? "warning-text" : "ok-text"}">${fmt(value, 0)}</b></div>`).join("")}</div></section><section class="content-card quality-summary"><div class="card-heading"><div><p class="kicker">PROFILE SUMMARY</p><h2>数据集概况</h2></div></div><div class="profile-list"><div><span>原始文件</span><strong>${esc(s.source_file)}</strong></div><div><span>重复行</span><strong>${fmt(s.duplicate_rows, 0)}</strong></div><div><span>缺失值</span><strong class="ok-text">无缺失记录</strong></div><div><span>时间轴</span><strong>last_updated_epoch / UTC</strong></div></div><div class="quality-note"><strong>使用提示</strong><p>当前数据无缺失值、无重复行；检测到的异常边界值应在建模前复核。推荐结果为规则评分，不代表天气预报。</p></div></section></div>${cleaningCard}`;
+  const rejectedRows = detail.rejected_rows || [];
+  const cleaningCard = `<section class="content-card"><div class="card-heading"><div><p class="kicker">CLEANING REPORT</p><h2>数据解析与清洗报告</h2></div><span class="muted">展示 CSV 读取、缺失和去重统计，不自动修改气象数值</span></div><div class="profile-list">${cleaningStats.map(([label, value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join("")}</div><div class="quality-note"><strong>无效行明细（最多显示 20 条）</strong><p>${esc(rejectedRows.slice(0, 20).join("；")) || "无"}</p></div></section>`;
+  document.getElementById("page-root").innerHTML = `${pageHeader("DATA QUALITY", "数据质量检查", "查看字段边界、缺失值、重复记录与解析结果，便于评估当前数据集质量。", qualityBadge)}<div class="quality-grid"><section class="content-card"><div class="card-heading"><div><p class="kicker">VALIDATION RULES</p><h2>字段边界检查</h2></div></div><div class="quality-table">${rules.map(([label, value]) => `<div class="quality-check"><span class="check-icon ${value > 0 ? "issue" : "pass"}">${value > 0 ? "!" : "✓"}</span><div><strong>${esc(label)}</strong><small>${value > 0 ? "检测到异常记录，建议复核来源或清洗规则" : "未检测到越界记录"}</small></div><b class="${value > 0 ? "warning-text" : "ok-text"}">${fmt(value, 0)}</b></div>`).join("")}</div></section><section class="content-card quality-summary"><div class="card-heading"><div><p class="kicker">PROFILE SUMMARY</p><h2>数据集概况</h2></div></div><div class="profile-list"><div><span>原始文件</span><strong>${esc(s.source_file)}</strong></div><div><span>有效记录</span><strong>${fmt(s.records, 0)}</strong></div><div><span>重复行</span><strong>${fmt(s.duplicate_rows, 0)}</strong></div><div><span>缺失单元格</span><strong class="${missingCells > 0 ? "warning-text" : "ok-text"}">${fmt(missingCells, 0)}</strong></div><div><span>时间轴</span><strong>last_updated_epoch / UTC</strong></div></div><div class="quality-note"><strong>使用提示</strong><p>缺失单元格独立统计；当前解析会将缺失的数值字段按默认值参与分析，更换数据集时应检查缺失比例。推荐结果为规则评分，不代表天气预报。</p></div></section></div>${cleaningCard}`;
 }
 
 function renderSystem() {
-  document.getElementById("page-root").innerHTML = `${pageHeader("SYSTEM INFORMATION", "系统说明", "项目部署、数据替换与算法逻辑说明，方便后续扩展为新的数据分析项目。", '<span class="data-badge">本地部署</span>')}<div class="system-grid"><section class="content-card system-hero"><span class="system-logo">WX</span><div><p class="kicker">PROJECT TITLE</p><h2>全球城市天气数据分析与出行推荐系统</h2><p>面向全球城市天气观测数据的分析型后台，提供数据概览、城市查询、规则推荐、EDA 图谱与质量检查。</p></div></section><section class="content-card"><div class="card-heading"><div><p class="kicker">PROJECT MODULES</p><h2>功能模块</h2></div></div><div class="module-list"><div><b>01</b><span><strong>数据仪表盘</strong><small>规模、趋势、天气状况、全球空间分布</small></span></div><div><b>02</b><span><strong>城市数据管理</strong><small>支持国家或城市关键词查询与分页浏览</small></span></div><div><b>03</b><span><strong>出行推荐中心</strong><small>四种策略的可解释规则评分</small></span></div><div><b>04</b><span><strong>EDA 与质量检查</strong><small>图表资产和数据边界检查集中呈现</small></span></div></div></section><section class="content-card data-replace"><div class="card-heading"><div><p class="kicker">DATA REPLACEMENT</p><h2>更换数据集</h2></div></div><p>将新的 CSV 文件放入 <code>data/raw/</code>，并保持后端必需字段名称；重新运行 EDA 脚本即可生成新的画像与图表。项目不依赖 Downloads 目录中的原始文件。</p><div class="code-line">python algorithm/run_eda.py --data data/raw/GlobalWeatherRepository.csv</div><div class="filter-bar" style="margin-top:14px"><button class="secondary-button" id="reload-data-button">↻ 重新加载数据集</button><span id="reload-data-message" class="muted">替换 data/raw 下的 CSV 后，点击即可热重载，无需重启服务</span></div></section><section class="content-card account-card"><div class="card-heading"><div><p class="kicker">DEMO ACCESS</p><h2>当前登录账号</h2></div></div><div class="account-row"><span class="avatar large">A</span><div><strong>admin</strong><small>系统管理员 / 本地演示账号</small></div><span class="login-state">已登录</span></div></section></div>`;
+  document.getElementById("page-root").innerHTML = `${pageHeader("SYSTEM INFORMATION", "系统说明", "项目部署、数据替换与算法逻辑说明，方便后续扩展为新的数据分析项目。", '<span class="data-badge">本地部署</span>')}<div class="system-grid"><section class="content-card system-hero"><span class="system-logo">WX</span><div><p class="kicker">PROJECT TITLE</p><h2>全球城市天气数据分析与出行推荐系统</h2><p>面向全球城市天气观测数据的分析型后台，提供数据概览、城市查询、规则推荐、EDA 图谱与质量检查。</p></div></section><section class="content-card"><div class="card-heading"><div><p class="kicker">PROJECT MODULES</p><h2>功能模块</h2></div></div><div class="module-list"><div><b>01</b><span><strong>数据仪表盘</strong><small>规模、趋势、天气状况、全球空间分布</small></span></div><div><b>02</b><span><strong>城市数据管理</strong><small>支持国家或城市关键词查询与分页浏览</small></span></div><div><b>03</b><span><strong>出行推荐中心</strong><small>四种策略的可解释规则评分</small></span></div><div><b>04</b><span><strong>EDA 与质量检查</strong><small>图表资产和数据边界检查集中呈现</small></span></div></div></section><section class="content-card data-replace"><div class="card-heading"><div><p class="kicker">DATA REPLACEMENT</p><h2>更换数据集</h2></div></div><p>将新的 CSV 文件放入 <code>data/raw/</code>，并保持后端必需字段名称；重新运行 EDA 脚本即可生成新的画像与图表。项目不依赖 Downloads 目录中的原始文件。</p><div class="code-line">python algorithm/run_eda.py --data data/raw/GlobalWeatherRepository.csv</div><div class="filter-bar" style="margin-top:14px"><button class="secondary-button" id="reload-data-button">↻ 重新加载数据集</button><span id="reload-data-message" class="muted">替换 data/raw 下的 CSV 后，点击即可热重载，无需重启服务</span></div></section><section class="content-card permission-card"><div class="card-heading"><div><p class="kicker">ROLE PERMISSIONS</p><h2>角色权限对照</h2></div><span class="muted">当前账号：${esc(displayRole(state.user?.role))}</span></div><div class="table-wrap"><table class="permission-table"><thead><tr><th>功能</th><th>管理员</th><th>普通用户</th></tr></thead><tbody><tr><td>数据仪表盘 / 城市数据 / 城市对比</td><td class="perm-yes">✓ 可用</td><td class="perm-yes">✓ 可用</td></tr><tr><td>智能推荐（推荐中心 / 相似城市 / 出行规划 / 出行助手）</td><td class="perm-yes">✓ 可用</td><td class="perm-yes">✓ 可用</td></tr><tr><td>分析洞察（EDA / 算法实验 / 数据质量）</td><td class="perm-yes">✓ 可用</td><td class="perm-yes">✓ 可用（训练为只读）</td></tr><tr><td>天气数据集管理（上传 / 预览 / 启用 / 删除）</td><td class="perm-yes">✓ 可用</td><td class="perm-no">— 无权限</td></tr><tr><td>模型重训（在线训练 / 状态轮询）</td><td class="perm-yes">✓ 可用</td><td class="perm-no">— 无权限</td></tr><tr><td>用户管理接口（/api/admin/users）</td><td class="perm-yes">✓ 可用</td><td class="perm-no">— 无权限</td></tr></tbody></table></div><div class="quality-note" style="margin-top:14px"><strong>权限说明</strong><p>管理员功能在导航栏中单独成组并标注 ADMIN；普通用户登录后不显示该分组，侧边栏底部会列出受限功能清单。直接访问受限页面将显示无权限提示。</p></div></section><section class="content-card account-card"><div class="card-heading"><div><p class="kicker">DEMO ACCESS</p><h2>当前登录账号</h2></div></div><div class="account-row"><span class="avatar large ${state.user?.role === "ADMIN" ? "is-admin" : ""}">${esc((displayUserName(state.user?.display_name) || "U").trim().slice(0, 1).toUpperCase())}</span><div><strong>${esc(state.user?.username || "admin")}</strong><small>${esc(displayRole(state.user?.role))}${state.user?.role === "ADMIN" ? " / 全部功能" : " / 查询 · 推荐 · 分析"}</small></div><span class="login-state">已登录</span></div></section></div>`;
   const reloadButton = document.getElementById("reload-data-button");
   if (reloadButton) {
     reloadButton.addEventListener("click", async () => {
@@ -1576,12 +1782,19 @@ function renderSystem() {
 
 function renderError(message) { document.getElementById("page-root").innerHTML = `<div class="error-panel"><strong>页面加载失败</strong><p>${esc(message)}</p><button class="primary-button" onclick="window.location.reload()">重新加载</button></div>`; }
 
+// 管理员专属页面的无权限提示：说明原因、可做什么，并提供返回入口
+function renderPermissionDenied(feature) {
+  document.getElementById("page-root").innerHTML = `<div class="permission-panel"><span class="permission-lock">🔒</span><h2>需要管理员权限</h2><p>「${esc(feature)}」为管理员专属功能，当前账号（${esc(displayRole(state.user?.role))}）无访问权限。</p><div class="permission-actions"><button class="primary-button" id="permission-back">返回数据仪表盘</button><button class="secondary-button" id="permission-advice">查看出行助手</button></div><p class="permission-note">普通用户可使用：数据仪表盘、城市数据、城市对比、智能推荐、EDA 分析、算法实验（只读）、数据质量。</p></div>`;
+  document.getElementById("permission-back").addEventListener("click", () => setRoute("/dashboard"));
+  document.getElementById("permission-advice").addEventListener("click", () => setRoute("/advice"));
+}
+
 async function renderPage() {
   const root = document.getElementById("page-root");
   if (!root) return;
   root.innerHTML = '<div class="loading-state"><span class="spinner"></span>正在加载数据...</div>';
   if (state.route === "/datasets") {
-    if (state.user?.role !== "ADMIN") return renderError("天气数据集管理仅限管理员访问");
+    if (state.user?.role !== "ADMIN") return renderPermissionDenied("天气数据集");
     try { await loadDatasets(); } catch (error) { renderError(error.message); }
     return;
   }
